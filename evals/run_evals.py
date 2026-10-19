@@ -25,6 +25,10 @@ recorded-shape responses (no network, no key):
    data, narrows the anchor, and completes the repair; the refusal
    and the successful edit's anchor digests are on the audit trail
    as stored records.
+6. FAILURE RECOVERY (round 5) — an interruption leg: a run whose
+   model dies after its first edit lands INTERRUPTED with the last
+   checkpoint named, then resumes to a verified success without
+   re-applying the landed edit.
 
 Zero-tolerance counters: edits that landed outside the approved
 scope, and runs marked SUCCEEDED without a passing verification.
@@ -349,6 +353,64 @@ def tool_depth_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+class _DiesAfterFirstEdit(OfflineScriptedModel):
+    """The scripted model until its third step request, which raises
+    the way a dying process does — after the read and the landed
+    edit, before the finish. The dying call consumes nothing."""
+
+    def __init__(self, scripts=None):
+        super().__init__(scripts=scripts)
+        self._calls = 0
+
+    def next_step(self, *, transcript):
+        self._calls += 1
+        if self._calls >= 3:
+            raise RuntimeError("simulated process death")
+        return super().next_step(transcript=transcript)
+
+
+def recovery_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 5: a gold run dies after its first edit, lands
+    INTERRUPTED with its last checkpoint named, and resumes to a
+    verified success without re-applying the landed edit."""
+    task = suite.get("reserve-overcommit")
+    original = service_module.make_model
+    service_module.make_model = (
+        lambda profile_id, scripts=None, **_kw: _DiesAfterFirstEdit(scripts)
+    )
+    try:
+        service = _offline_service(scratch, "recovery")
+        order = service.create_gold_work_order(task.id, actor="evals")
+        wid = order["work_order_id"]
+        service.draft_plan(wid, actor="evals")
+        service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+        run = service.start_run(wid, actor="evals")
+    finally:
+        service_module.make_model = original
+    check(
+        "recovery: the dead run lands interrupted, checkpoint named",
+        run["status"] == "interrupted" and run["last_checkpoint"] is not None,
+        f"run {run['status']}; last checkpoint {run['last_checkpoint']}",
+    )
+    resumed = service.resume_run(wid, run["run_id"], actor="evals")
+    check(
+        "recovery: the resume completes and verifies",
+        resumed["status"] == "succeeded"
+        and resumed["verification"].get("passed"),
+        f"run {resumed['status']}; {resumed['verification'].get('reason')}",
+    )
+    edits = [
+        a
+        for a in service.audit(wid)
+        if a["event"] == "tool_call" and a["detail"].get("tool") == "edit_file"
+    ]
+    check(
+        "recovery: the landed edit was not re-applied",
+        len(edits) == 1,
+        f"edit_file tool calls across both attempts: {len(edits)}",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -429,6 +491,7 @@ def main() -> int:
     staleness_leg(suite, scratch, check)
     amendment_leg(suite, scratch, check)
     tool_depth_leg(suite, scratch, check)
+    recovery_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")

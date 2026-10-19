@@ -426,10 +426,8 @@ def test_a_gold_task_runs_end_to_end_on_the_live_path(tmp_path, monkeypatch):
     assert detail["runs"][0]["usage_totals"]["prompt_tokens"] > 0
 
 
-def test_a_model_failure_mid_run_ends_the_run_failed(tmp_path, monkeypatch):
-    from open_model_coding_agent.service import CodingService
-
-    plan_ok = chat_response(
+def _plan_ok_response():
+    return chat_response(
         content=json.dumps(
             {
                 "approach": "Guard the reservation.",
@@ -443,7 +441,44 @@ def test_a_model_failure_mid_run_ends_the_run_failed(tmp_path, monkeypatch):
             }
         )
     )
-    transport = FakeTransport([plan_ok] + [HttpResponse(500, "{}")] * 5)
+
+
+def test_a_transient_model_failure_mid_run_interrupts_the_run(
+    tmp_path, monkeypatch
+):
+    """Round 5 semantics: a provider that stays down through the
+    adapter's retries is the world hiccupping, not the work being
+    wrong — the run lands INTERRUPTED (resumable), with the failure
+    named in its interruption reason. In round 2 this same shape
+    landed FAILED; the recovery round moved transient failures to
+    the state that can resume."""
+    from open_model_coding_agent.service import CodingService
+
+    transport = FakeTransport([_plan_ok_response()] + [HttpResponse(500, "{}")] * 5)
+    settings = _live_settings(tmp_path, transport, monkeypatch)
+    service = CodingService(settings)
+    order = service.create_gold_work_order("reserve-overcommit")
+    wid = order["work_order_id"]
+    service.draft_plan(wid)
+    service.decide_plan(wid, approve=True, actor="Reviewer")
+    run = service.start_run(wid)
+    assert run["status"] == "interrupted"
+    assert "model_server_error" in run["interruption_reason"]
+    assert run["failure_reason"] is None
+    assert service.get_work_order(wid)["status"] == "interrupted"
+    events = [a["event"] for a in service.audit(wid)]
+    assert "model_call_failed" in events and "run_interrupted" in events
+    assert "run_failed" not in events
+
+
+def test_a_terminal_model_failure_mid_run_still_fails_the_run(
+    tmp_path, monkeypatch
+):
+    """A rejected key will be rejected again on resume — terminal
+    model errors keep round 2's semantics and end the run FAILED."""
+    from open_model_coding_agent.service import CodingService
+
+    transport = FakeTransport([_plan_ok_response()] + [HttpResponse(401, "{}")] * 3)
     settings = _live_settings(tmp_path, transport, monkeypatch)
     service = CodingService(settings)
     order = service.create_gold_work_order("reserve-overcommit")
@@ -452,7 +487,7 @@ def test_a_model_failure_mid_run_ends_the_run_failed(tmp_path, monkeypatch):
     service.decide_plan(wid, approve=True, actor="Reviewer")
     run = service.start_run(wid)
     assert run["status"] == "failed"
-    assert "model_server_error" in run["failure_reason"]
+    assert "model_auth_failed" in run["failure_reason"]
     assert service.get_work_order(wid)["status"] == "failed"
     events = [a["event"] for a in service.audit(wid)]
     assert "model_call_failed" in events and "run_failed" in events
