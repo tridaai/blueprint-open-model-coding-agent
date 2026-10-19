@@ -328,6 +328,21 @@ class TemplateInstantiateIn(BaseModel):
     file_scope: list[str] | None = None
 
 
+class ChallengeAnswerIn(BaseModel):
+    """A challenge disposition arrives as a recorded act: which
+    disposition, by whom, and its content — the rebuttal's text
+    and the record it cites as counter-evidence, the revision
+    note for an accept-and-revise, the downgrade's reason. Which
+    fields a disposition requires is the gate's to judge, by
+    kind."""
+
+    kind: str  # accept_and_revise | rebut | downgrade
+    actor: str
+    text: str | None = None
+    cites: str | None = None
+    reason: str | None = None
+
+
 class ComparisonIn(BaseModel):
     """A shortlist comparison arrives as an act: which benchmark
     set every profile runs over (the tuning set by default — the

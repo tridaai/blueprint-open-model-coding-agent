@@ -538,6 +538,70 @@ class SqlStore:
             )
         return [json.loads(r["payload"]) for r in rows]
 
+    # -- run challenges (round 13) --------------------------------------
+    def put_challenge(self, record: dict) -> None:
+        """A challenge is written once when the pass raises it,
+        and afterwards only by a recorded act — an answer or a
+        supersession — which rewrites the row's status and
+        payload. The store keeps no other history for it: the
+        acts themselves are audit records."""
+        payload = json.dumps(record)
+        existing = self._one(
+            f"SELECT challenge_id FROM run_challenges "
+            f"WHERE challenge_id = {self._ph}",
+            (record["challenge_id"],),
+        )
+        if existing:
+            self._write(
+                f"UPDATE run_challenges SET status = {self._ph}, "
+                f"payload = {self._ph} WHERE challenge_id = {self._ph}",
+                (record["status"], payload, record["challenge_id"]),
+            )
+        else:
+            self._write(
+                f"INSERT INTO run_challenges (challenge_id, run_id, "
+                f"work_order_id, rule, status, payload, created_at) "
+                f"VALUES ({self._ph}, {self._ph}, {self._ph}, "
+                f"{self._ph}, {self._ph}, {self._ph}, {self._ph})",
+                (
+                    record["challenge_id"],
+                    record["run_id"],
+                    record["work_order_id"],
+                    record["rule"],
+                    record["status"],
+                    payload,
+                    record["created_at"],
+                ),
+            )
+
+    def get_challenge(self, challenge_id: str) -> dict | None:
+        row = self._one(
+            f"SELECT payload FROM run_challenges "
+            f"WHERE challenge_id = {self._ph}",
+            (challenge_id,),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def list_challenges(
+        self,
+        work_order_id: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict]:
+        clauses, params = [], []
+        if work_order_id is not None:
+            clauses.append(f"work_order_id = {self._ph}")
+            params.append(work_order_id)
+        if run_id is not None:
+            clauses.append(f"run_id = {self._ph}")
+            params.append(run_id)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._all(
+            f"SELECT payload FROM run_challenges{where} "
+            f"ORDER BY created_at, challenge_id",
+            tuple(params),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
     # -- audit --------------------------------------------------------------
     def append_audit(
         self, entity: str, entity_id: str, event: str, actor: str, detail: dict

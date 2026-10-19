@@ -285,6 +285,7 @@ async function loadQueue() {
         } else if (e.category === "awaiting_review") {
           const f = e.risk_flags || {};
           detail = `run on plan v${e.plan_version} · changed: ${(e.changed_files || []).map(esc).join(", ")}` +
+            (e.unanswered_must_answer ? ` · <span class="bad">${e.unanswered_must_answer} unanswered challenge(s) block acceptance</span>` : ``) +
             (f.test_surface_touched ? ` · <span class="bad">test surface touched</span>` : ``) +
             ((f.unplanned_files || []).length ? ` · <span class="bad">unplanned files: ${f.unplanned_files.map(esc).join(", ")}</span>` : ``) +
             (f.hidden_verdict ? ` · hidden re-grade: ${esc(f.hidden_verdict)}` : ``);
@@ -557,6 +558,34 @@ async function showDetail(id) {
     } else if (flags.hidden_verdict) {
       html += `<div class="muted" style="margin-top:6px">Verdicts — visible: ${esc(flags.visible_verdict || "—")} · hidden re-grade: ${esc(flags.hidden_verdict)}</div>`;
     }
+    const chs = packet.challenges || [];
+    if (chs.length) {
+      const sum = packet.challenge_summary || {};
+      html += `<div style="margin-top:8px"><strong>Challenges</strong>
+        <span class="muted">— the challenge pass's independent look at this verified patch, from the stored records:
+        ${sum.open_must_answer || 0} unanswered must-answer · ${sum.open_advisory || 0} open advisory ·
+        ${sum.answered || 0} answered · ${sum.superseded || 0} superseded.
+        An unanswered must-answer challenge blocks acceptance; each answer is a recorded act.</span></div>` +
+        chs.map((c) => {
+          const ev = c.evidence || {};
+          const what = ev.symbol ? `symbol ${esc(ev.symbol)}` : (ev.value ? `figure ${esc(ev.value)}` : "");
+          const sev = c.current_severity === c.severity
+            ? esc(c.severity.replaceAll("_", "-"))
+            : `${esc(c.current_severity.replaceAll("_", "-"))} (downgraded from ${esc(c.severity.replaceAll("_", "-"))})`;
+          const state = c.status === "answered" && c.disposition
+            ? `answered — ${esc(c.disposition.kind.replaceAll("_", " "))} by ${esc(c.disposition.actor)}` +
+              (c.disposition.reason ? ` · reason: “${esc(c.disposition.reason)}”` : "") +
+              (c.disposition.text ? ` · “${esc(c.disposition.text)}”` : "") +
+              (c.disposition.cites ? ` · cites: ${esc(c.disposition.cites)}` : "")
+            : esc(c.status);
+          const acts = c.status === "open" ? `<span style="margin-left:8px">
+            <button class="secondary" onclick="answerChallenge('${esc(id)}', '${esc(c.challenge_id)}', 'rebut')">Rebut</button>
+            ${c.current_severity === "must_answer" ? `<button class="secondary" onclick="answerChallenge('${esc(id)}', '${esc(c.challenge_id)}', 'downgrade')">Downgrade</button>
+            <button class="secondary" onclick="answerChallenge('${esc(id)}', '${esc(c.challenge_id)}', 'accept_and_revise')">Accept &amp; revise</button>` : ``}</span>` : ``;
+          return `<div class="muted"><span class="${c.current_severity === "must_answer" && c.status === "open" ? "bad" : ""}">${esc(c.rule.replaceAll("_", " "))}</span>
+            · ${sev} · ${esc(ev.file || "")} ${what} · ${esc(ev.hunk || "")} — ${state}${acts}</div>`;
+        }).join("");
+    }
     const decs = packet.review_decisions || [];
     if (decs.length) {
       html += `<div style="margin-top:8px"><strong>Prior decisions</strong></div>` +
@@ -651,6 +680,26 @@ async function requestChanges(id) {
   if (note === null) return;
   await act(`/api/work-orders/${id}/review`,
     { decision: "request_changes", actor, reason: note }, id);
+}
+
+async function answerChallenge(id, challengeId, kind) {
+  const body = { kind, actor };
+  if (kind === "rebut") {
+    const text = prompt("The rebuttal — why does this challenge not stand?");
+    if (text === null) return;
+    const cites = prompt("The counter-evidence it cites — a record: the plan, the task text, the verification record, another run.");
+    if (cites === null) return;
+    body.text = text; body.cites = cites;
+  } else if (kind === "downgrade") {
+    const reason = prompt("Why does this must-answer challenge stand as advisory? The reason is stored; the original severity stays on the record.");
+    if (reason === null) return;
+    body.reason = reason;
+  } else {
+    const text = prompt("What must change? Stored on the order as the review note, with the challenge cited in it.");
+    if (text === null) return;
+    body.text = text;
+  }
+  await act(`/api/work-orders/${id}/challenges/${challengeId}/answer`, body, id);
 }
 
 loadReadiness(); loadGold(); loadOrders(); loadQueue(); loadCosts(); loadPromotion(); loadComparisons(); loadTemplates();

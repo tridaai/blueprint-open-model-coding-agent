@@ -20,6 +20,7 @@ from .model_port import PlanDraft, PlanStepDraft
 from .models import (
     AmendPlanIn,
     BenchmarkIn,
+    ChallengeAnswerIn,
     ComparisonIn,
     EvaluateIn,
     PlanDecisionIn,
@@ -303,6 +304,32 @@ def create_app(settings=None) -> FastAPI:
             actor=body.actor,
             reason=body.reason,
             decision=body.decision,
+        )
+
+    # -- the challenge pass (round 13) --------------------------------------
+    @app.get("/api/work-orders/{work_order_id}/challenges")
+    def list_challenges(work_order_id: str, run_id: str | None = None):
+        if service.store.get_work_order(work_order_id) is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"no work order {work_order_id!r}", "code": "unknown_work_order"},
+            )
+        return service.list_challenges(work_order_id, run_id=run_id)
+
+    @app.post(
+        "/api/work-orders/{work_order_id}/challenges/{challenge_id}/answer"
+    )
+    def answer_challenge(
+        work_order_id: str, challenge_id: str, body: ChallengeAnswerIn
+    ):
+        return service.answer_challenge(
+            work_order_id,
+            challenge_id,
+            kind=body.kind,
+            actor=body.actor,
+            text=body.text,
+            cites=body.cites,
+            reason=body.reason,
         )
 
     return app

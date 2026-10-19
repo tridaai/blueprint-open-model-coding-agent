@@ -42,6 +42,26 @@ reason recorded, rather than crashing the shell.
 - A human reviews a SUCCEEDED run: accept exports the .patch file,
   reject records the reason. Nothing is ever applied to the source
   repo by the agent's hand.
+- Before that review can accept, the challenge pass (round 13)
+  takes a second, independent look at the verified patch —
+  deterministic rules computed from the run's stored records
+  alone (the patch, the approved plan, the task text, the run's
+  retained pristine snapshot; never the model's transcript or
+  self-report): did the patch stray inside the files it was
+  allowed to touch (``intent_creep``), introduce a figure no
+  record carries (``single_source_figures``), or grow public
+  surface nobody asked for (``unrequested_surface``)? Each fired
+  rule stores a challenge record with its evidence. An
+  unanswered must-answer challenge refuses acceptance by name;
+  a reviewer answers each challenge with a recorded disposition
+  — rebut it (naming the counter-evidence record), downgrade it
+  (with a reason; the original severity stays on the record), or
+  accept and revise (the order returns through the
+  request-changes path, the challenge cited in the note).
+  Challenges are never deleted: when a newer run supersedes the
+  run they were raised on, they are marked superseded, and the
+  pass itself is idempotent — re-running it over the same run
+  stores nothing new.
 - The review workbench (round 11) is folds, not state. The review
   queue is derived on read from the stored records — orders whose
   plans await a decision, whose runs stand SUCCEEDED awaiting
@@ -162,6 +182,7 @@ from .benchmarks import (
     split_problems,
     task_set_hash,
 )
+from .challenges import compute_challenges
 from .config import Settings, load_settings, resolve_profile
 from .errors import ConfigError, GateError
 from .gold import GoldSuite
@@ -1843,6 +1864,10 @@ class CodingService:
             transcript: list[dict] = []
             progress = _RunProgress()
             self._set_status(order, "running")
+            # Round 13: this run replaces every earlier run as
+            # the order's current attempt — challenges raised on
+            # those runs are marked superseded, never deleted.
+            self._supersede_challenges(work_order_id, keep_run_id=run_id)
             self._audit(
                 "work_order", work_order_id, "run_started", actor,
                 run_id=run_id, plan_version=plan["version"],
@@ -2105,6 +2130,12 @@ class CodingService:
             "run_finished", work_order_id=work_order_id, run_id=run_id,
             status=run.status,
         )
+        if run.status == "succeeded":
+            # Round 13: the challenge pass takes its independent
+            # look at the verified patch now, from the stored
+            # records — its challenges stand between this run and
+            # the review gate's accept.
+            self.challenge_pass(work_order_id, run_id=run_id)
         return self._attach_usage(run.model_dump())
 
     # -- checkpoints ---------------------------------------------------------
@@ -2802,13 +2833,7 @@ class CodingService:
                     "next plan draft — a send-back without it decides "
                     "nothing the planner can act on",
                 )
-            order["review_note"] = note
-            self._set_status(order, "changes_requested")
-            self._audit(
-                "work_order", work_order_id, "review_changes_requested",
-                actor, run_id=run["run_id"], note=note,
-            )
-            log_event("review_changes_requested", work_order_id=work_order_id)
+            self._apply_request_changes(order, run, actor=actor, note=note)
             return self.store.get_work_order(work_order_id)
         if order["status"] != "succeeded" or run is None:
             raise GateError(
@@ -2817,6 +2842,25 @@ class CodingService:
                 f"review (status {order['status']})",
             )
         if decision == "accept":
+            # Round 13: the challenge pass stands between a
+            # verified run and acceptance. An unanswered
+            # must-answer challenge refuses the accept by name —
+            # the reviewer answers it (rebut, downgrade, or
+            # accept-and-revise) or the patch does not land.
+            open_must = self._open_must_answer(work_order_id, run["run_id"])
+            if open_must:
+                rules = ", ".join(
+                    sorted({c["rule"] for c in open_must})
+                )
+                raise GateError(
+                    "unanswered_challenges",
+                    f"review acceptance refused: run {run['run_id']} "
+                    f"carries {len(open_must)} unanswered must-answer "
+                    f"challenge(s) ({rules}) — answer each one "
+                    f"(rebut it with its counter-evidence, downgrade "
+                    f"it with a reason, or accept and revise) before "
+                    f"the patch can be accepted",
+                )
             artifact = self.settings.artifacts_dir / f"{work_order_id}.patch"
             artifact.write_text(run["patch"])
             self._set_status(order, "accepted")
@@ -2833,6 +2877,322 @@ class CodingService:
             )
             log_event("review_rejected", work_order_id=work_order_id)
         return self.store.get_work_order(work_order_id)
+
+    def _apply_request_changes(
+        self,
+        order: dict,
+        run: dict,
+        *,
+        actor: str,
+        note: str,
+        challenge_id: str | None = None,
+    ) -> None:
+        """The send-back mechanics, shared by the review gate's
+        request-changes decision and a challenge's
+        accept-and-revise disposition: the note is stored on the
+        order for the next plan draft, the order returns to
+        ``changes_requested``, and the act is audited — with the
+        challenge cited when a disposition drove it."""
+        order["review_note"] = note
+        self._set_status(order, "changes_requested")
+        detail: dict = {}
+        if challenge_id is not None:
+            detail["challenge_id"] = challenge_id
+        self._audit(
+            "work_order", order["work_order_id"], "review_changes_requested",
+            actor, run_id=run["run_id"], note=note, **detail,
+        )
+        log_event(
+            "review_changes_requested", work_order_id=order["work_order_id"]
+        )
+
+    # -- the challenge pass (round 13) -----------------------------------------
+    #
+    # A second, independent look at a verified patch, computed by
+    # challenges.compute_challenges from the run's stored records
+    # alone — the patch, the approved plan, the task text, and the
+    # run's retained pristine snapshot. The pass runs when a run
+    # lands SUCCEEDED; its challenges stand between that run and
+    # the review gate's accept. A challenge is answered by a
+    # recorded disposition, never deleted; when a newer run
+    # replaces the run it was raised on, it is marked superseded,
+    # disposition and all.
+
+    def challenge_pass(
+        self, work_order_id: str, run_id: str | None = None
+    ) -> list[dict]:
+        """Run (or re-run) the challenge pass over a SUCCEEDED
+        run's stored records, storing any challenges not already
+        on record. Idempotent: candidates dedupe on the run and
+        their evidence key, so a re-run over the same records
+        stores nothing new — a fresh pass belongs to a fresh run
+        (a new patch), never to a second look at the same one.
+        Returns the run's challenges as they now stand."""
+        order = self._require_order(work_order_id)
+        if run_id is not None:
+            run = self._require_run(order, run_id)
+        else:
+            run = self.store.latest_run(work_order_id)
+            if run is None:
+                raise GateError(
+                    "unknown_run",
+                    f"work order {work_order_id} has no run to challenge",
+                )
+        if run["status"] != "succeeded":
+            raise GateError(
+                "run_not_succeeded",
+                f"the challenge pass judges verified patches: run "
+                f"{run['run_id']} stands {run['status']}, not succeeded",
+            )
+        plan = (
+            self.store.get_plan(work_order_id, run["plan_version"]) or {}
+        )
+        pristine = Path(run["workspace"]).parent / "pristine"
+        prior_texts: dict[str, str | None] = {}
+        for rel in run.get("changed_files") or []:
+            base = pristine / rel
+            prior_texts[rel] = (
+                base.read_text() if base.is_file() else None
+            )
+        candidates = compute_challenges(
+            task_text=order["task_text"],
+            plan=plan,
+            patch_text=run.get("patch") or "",
+            changed_files=list(run.get("changed_files") or []),
+            prior_texts=prior_texts,
+        )
+        existing = {
+            c["evidence_key"]: c
+            for c in self.store.list_challenges(run_id=run["run_id"])
+        }
+        raised = 0
+        for candidate in candidates:
+            if candidate["evidence_key"] in existing:
+                continue
+            record = {
+                "challenge_id": _new_id("challenge"),
+                "run_id": run["run_id"],
+                "work_order_id": work_order_id,
+                "rule": candidate["rule"],
+                "severity": candidate["severity"],
+                "current_severity": candidate["severity"],
+                "status": "open",
+                "evidence": candidate["evidence"],
+                "evidence_key": candidate["evidence_key"],
+                "disposition": None,
+                "created_at": utcnow(),
+            }
+            self.store.put_challenge(record)
+            existing[record["evidence_key"]] = record
+            raised += 1
+            self._audit(
+                "work_order", work_order_id, "challenge_raised", "shell",
+                challenge_id=record["challenge_id"],
+                run_id=run["run_id"], rule=record["rule"],
+                severity=record["severity"],
+            )
+        challenges = self.store.list_challenges(run_id=run["run_id"])
+        self._audit(
+            "work_order", work_order_id, "challenge_pass_completed",
+            "shell", run_id=run["run_id"], raised=raised,
+            open_must_answer=len(
+                self._open_must_answer(work_order_id, run["run_id"])
+            ),
+            total=len(challenges),
+        )
+        log_event(
+            "challenge_pass_completed",
+            work_order_id=work_order_id, run_id=run["run_id"],
+            raised=raised,
+        )
+        return challenges
+
+    def list_challenges(
+        self, work_order_id: str, run_id: str | None = None
+    ) -> list[dict]:
+        """An order's challenges — one run's, or every run's —
+        in the order they were raised."""
+        self._require_order(work_order_id)
+        return self.store.list_challenges(
+            work_order_id=work_order_id, run_id=run_id
+        )
+
+    def _open_must_answer(
+        self, work_order_id: str, run_id: str
+    ) -> list[dict]:
+        """The challenges standing between a run and acceptance:
+        open, and must-answer at their current severity."""
+        return [
+            c
+            for c in self.store.list_challenges(
+                work_order_id=work_order_id, run_id=run_id
+            )
+            if c["status"] == "open"
+            and c["current_severity"] == "must_answer"
+        ]
+
+    def _supersede_challenges(
+        self, work_order_id: str, *, keep_run_id: str
+    ) -> None:
+        """A newer run replaces the runs before it as the order's
+        current attempt: their challenges are marked superseded —
+        never deleted, dispositions intact — and stop standing
+        between anything and acceptance."""
+        for challenge in self.store.list_challenges(
+            work_order_id=work_order_id
+        ):
+            if challenge["run_id"] == keep_run_id:
+                continue
+            if challenge["status"] == "superseded":
+                continue
+            challenge["status"] = "superseded"
+            self.store.put_challenge(challenge)
+            self._audit(
+                "work_order", work_order_id, "challenge_superseded",
+                "shell", challenge_id=challenge["challenge_id"],
+                run_id=challenge["run_id"], superseded_by=keep_run_id,
+            )
+
+    def answer_challenge(
+        self,
+        work_order_id: str,
+        challenge_id: str,
+        *,
+        kind: str,
+        actor: str,
+        text: str | None = None,
+        cites: str | None = None,
+        reason: str | None = None,
+    ) -> dict:
+        """Answer one challenge, as a recorded act. Three
+        dispositions stand:
+
+        - ``rebut`` — the challenge is wrong, and the rebuttal
+          says why *and names the record it stands on* (the plan
+          step, the verification record, the task text): a
+          rebuttal without its counter-evidence cited is an
+          opinion, and refuses by name.
+        - ``downgrade`` — the challenge stands but does not
+          block: a must-answer challenge becomes advisory, with
+          the reason recorded. The original severity stays on
+          the record; only the current severity moves.
+        - ``accept_and_revise`` — the challenge is right: the
+          order returns through the review gate's request-changes
+          path, the challenge cited in the stored note, and a
+          fresh plan drafts against it.
+
+        An answered or superseded challenge takes no second
+        answer. The disposition is stored on the challenge and
+        audited; the challenge itself is never deleted."""
+        order = self._require_order(work_order_id)
+        challenge = self.store.get_challenge(challenge_id)
+        if challenge is None or challenge["work_order_id"] != work_order_id:
+            raise GateError(
+                "unknown_challenge",
+                f"work order {work_order_id} has no challenge "
+                f"{challenge_id!r}",
+            )
+        if challenge["status"] == "superseded":
+            raise GateError(
+                "challenge_superseded",
+                f"challenge {challenge_id} was raised on run "
+                f"{challenge['run_id']}, which a newer run has "
+                f"superseded; it takes no answer",
+            )
+        if challenge["status"] == "answered":
+            raise GateError(
+                "challenge_already_answered",
+                f"challenge {challenge_id} already carries its "
+                f"disposition ({(challenge.get('disposition') or {}).get('kind')}); "
+                f"a challenge is answered once",
+            )
+        if kind not in ("accept_and_revise", "rebut", "downgrade"):
+            raise GateError(
+                "unknown_challenge_disposition",
+                f"a challenge is answered by accept_and_revise, "
+                f"rebut, or downgrade, not {kind!r}",
+            )
+        disposition: dict = {
+            "kind": kind,
+            "actor": actor,
+            "at": utcnow(),
+            "text": (text or "").strip() or None,
+            "cites": (cites or "").strip() or None,
+            "reason": (reason or "").strip() or None,
+        }
+        if kind == "rebut":
+            if not disposition["text"] or not disposition["cites"]:
+                raise GateError(
+                    "rebuttal_needs_evidence",
+                    "a rebuttal must state its case and name the "
+                    "record it stands on as counter-evidence — a "
+                    "rebuttal that cites nothing is an opinion, "
+                    "and the challenge stands",
+                )
+        elif kind == "downgrade":
+            if challenge["current_severity"] != "must_answer":
+                raise GateError(
+                    "challenge_not_downgradable",
+                    f"challenge {challenge_id} stands "
+                    f"{challenge['current_severity']}; only a "
+                    f"must-answer challenge can be downgraded",
+                )
+            if not disposition["reason"]:
+                raise GateError(
+                    "downgrade_reason_required",
+                    "downgrading a must-answer challenge requires "
+                    "the reason: the severity was the rule's "
+                    "judgement, and moving it is a person's — the "
+                    "record must say why",
+                )
+        elif kind == "accept_and_revise":
+            run = self.store.get_run(challenge["run_id"])
+            latest = self.store.latest_run(work_order_id)
+            if (
+                run is None
+                or latest is None
+                or latest["run_id"] != challenge["run_id"]
+                or run["status"] != "succeeded"
+                or order["status"] not in ("succeeded", "rejected")
+            ):
+                raise GateError(
+                    "no_succeeded_run_to_return",
+                    f"work order {work_order_id} has no succeeded "
+                    f"run standing to send back on challenge "
+                    f"{challenge_id} (status {order['status']})",
+                )
+            evidence = challenge["evidence"]
+            citation = (
+                f"challenge {challenge_id} ({challenge['rule']}, "
+                f"{evidence.get('file')}: "
+                f"{evidence.get('symbol') or evidence.get('value')})"
+            )
+            note = (
+                f"{disposition['text']} [{citation}]"
+                if disposition["text"]
+                else citation
+            )
+            disposition["note"] = note
+            self._apply_request_changes(
+                order, run, actor=actor, note=note,
+                challenge_id=challenge_id,
+            )
+        if kind == "downgrade":
+            challenge["current_severity"] = "advisory"
+        challenge["status"] = "answered"
+        challenge["disposition"] = disposition
+        self.store.put_challenge(challenge)
+        self._audit(
+            "work_order", work_order_id, "challenge_answered", actor,
+            challenge_id=challenge_id, run_id=challenge["run_id"],
+            kind=kind,
+        )
+        log_event(
+            "challenge_answered",
+            work_order_id=work_order_id, challenge_id=challenge_id,
+            kind=kind,
+        )
+        return self.store.get_challenge(challenge_id)
 
     # -- the review workbench (round 11) --------------------------------------
     #
@@ -2934,6 +3294,12 @@ class CodingService:
                     "available_acts": ["review"],
                     "run_id": run["run_id"],
                     "plan_version": run["plan_version"],
+                    # Round 13: the count standing between this
+                    # entry and an acceptance — the challenge
+                    # pass's unanswered must-answer challenges.
+                    "unanswered_must_answer": len(
+                        self._open_must_answer(wid, run["run_id"])
+                    ),
                     "changed_files": list(run.get("changed_files") or []),
                     "risk_flags": {
                         "test_surface_touched": bool(
@@ -3002,7 +3368,11 @@ class CodingService:
         ad-hoc order, which has no hidden set: the flag says so
         rather than letting a missing verdict read as a pass);
         the run's usage and priced cost; the order's run history;
-        and its prior review decisions. Once a decision stands on
+        and its prior review decisions. Since round 13 the packet
+        also carries the challenge pass's records on the run it
+        stands on — each challenge's rule, severity, evidence, and
+        disposition state, with the counts folded beside them.
+        Once a decision stands on
         an earlier run, the packet also names what changed since
         that packet: the plan version, the patch's files (added
         and removed), and the verdicts, then and now."""
@@ -3023,6 +3393,17 @@ class CodingService:
                 plan = self._with_fingerprint_state(order, latest)
         verification = (run or {}).get("verification") or {}
         hidden = verification.get("hidden_verdict")
+        # Round 13: the challenge pass's records on the run this
+        # packet stands on — the challenges a reviewer must answer
+        # before acceptance, with their dispositions — and the
+        # counts folded beside them.
+        packet_challenges = (
+            self.store.list_challenges(
+                work_order_id, run_id=run["run_id"]
+            )
+            if run is not None
+            else []
+        )
         packet: dict = {
             "work_order": order,
             "task": {
@@ -3074,11 +3455,42 @@ class CodingService:
                 for r in runs
             ],
             "review_decisions": decisions,
+            "challenges": packet_challenges,
+            "challenge_summary": self._challenge_summary(
+                packet_challenges
+            ),
             "changes_since_previous": self._packet_changes(
                 runs, run, decisions
             ),
         }
         return packet
+
+    @staticmethod
+    def _challenge_summary(challenges: list[dict]) -> dict:
+        """A run's challenges counted by where they stand: open
+        at each severity, answered, superseded. Folded on read
+        from the challenge records, like every workbench number."""
+        return {
+            "total": len(challenges),
+            "open_must_answer": sum(
+                1
+                for c in challenges
+                if c["status"] == "open"
+                and c["current_severity"] == "must_answer"
+            ),
+            "open_advisory": sum(
+                1
+                for c in challenges
+                if c["status"] == "open"
+                and c["current_severity"] == "advisory"
+            ),
+            "answered": sum(
+                1 for c in challenges if c["status"] == "answered"
+            ),
+            "superseded": sum(
+                1 for c in challenges if c["status"] == "superseded"
+            ),
+        }
 
     @staticmethod
     def _packet_changes(
