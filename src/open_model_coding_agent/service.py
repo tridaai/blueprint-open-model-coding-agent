@@ -29,6 +29,16 @@ reason recorded, rather than crashing the shell.
   grading tests run there. SUCCEEDED means exactly that the patch
   applies cleanly, touches only in-scope files, and the grading tests
   pass on the fresh copy.
+- Verification has depth (round 10). Every verdict record carries
+  the patch's shape facts (files, lines added/removed per file,
+  binary, whitespace-only), whether the patch touched the
+  test/grading surface, and which changed files no step of the
+  approved plan named. For a gold task a test-surface or unplanned
+  patch fails by name, and a visible pass is re-graded against the
+  task's hidden grading set — staged only at that moment, into the
+  verification copy — with a hidden failure flipping the verdict
+  to FAILED as ``hidden_grading_failed``. The record distinguishes
+  the visible and hidden verdicts.
 - A human reviews a SUCCEEDED run: accept exports the .patch file,
   reject records the reason. Nothing is ever applied to the source
   repo by the agent's hand.
@@ -115,7 +125,8 @@ from .gold import GoldSuite
 from .logging_setup import log_event
 from .model_port import Step, make_model, validate_plan_draft
 from .models import Plan, PlanStep, Run, WorkOrder, WorkOrderIn
-from .patch import PatchError, apply_patch, build_patch
+from .patch import PatchError, apply_patch, build_patch, patch_shape
+from .verification import planned_files, test_surface_files, unplanned_files
 from .plans import diff_plans, drifted_files, file_digests, scope_fingerprint
 from .prices import current_table, fold_usage, load_price_tables
 from .profiles import list_profiles
@@ -595,6 +606,21 @@ class CodingService:
             outcome["failure_class"] = "unverified_success"
             outcome["detail"] = (
                 "run stands succeeded without a passing verification"
+            )
+        elif (
+            run["status"] == "succeeded"
+            and (run.get("verification") or {}).get("hidden_verdict") != "pass"
+        ):
+            # Round 10: a gold run's success stands on both verdicts.
+            # Verification already makes this unreachable (a hidden
+            # failure flips passed to False, and SUCCEEDED follows
+            # passed) — the record is checked anyway, in the gate's
+            # usual mould.
+            outcome["failure_class"] = "unverified_success"
+            outcome["detail"] = (
+                "run stands succeeded without a passing hidden re-grade "
+                f"(hidden verdict: "
+                f"{(run.get('verification') or {}).get('hidden_verdict')})"
             )
         elif run["status"] == "succeeded" and verified:
             outcome["verified_success"] = True
@@ -1625,6 +1651,9 @@ class CodingService:
             "work_order", work_order_id, "verification_completed", "shell",
             run_id=run_id, passed=verification["passed"],
             reason=verification["reason"], changed_files=changed,
+            test_surface_files=verification.get("test_surface_files") or [],
+            unplanned_files=verification.get("unplanned_files") or [],
+            hidden_verdict=verification.get("hidden_verdict"),
         )
         self._audit(
             "work_order", work_order_id,
@@ -2019,21 +2048,96 @@ class CodingService:
     ) -> dict:
         """The verdict, computed by the shell on a fresh copy.
 
-        Order of checks: the patch must exist, touch only in-scope
-        files, apply cleanly to a pristine copy, and pass the grading
-        tests there. The agent's in-run results play no part.
+        Order of checks: the patch must exist and be substantive,
+        touch only in-scope files, apply cleanly to a pristine copy,
+        and pass the grading tests there — and, for a gold task,
+        pass the hidden re-grade staged only then. The agent's
+        in-run results play no part.
+
+        Round 10 adds the depth checks, computed before any grading
+        runs and stored on every verdict record (see
+        :mod:`.verification`): the patch's shape facts, the files
+        it touches that are test/grading surface
+        (``test_surface_touched``), and the files no step of the
+        approved plan named (``unplanned_files``). Policy: for a
+        gold task — whose fix never lives in tests, and whose plan
+        steps cover exactly the task's scope — a test-surface or
+        unplanned patch fails verification by name. For an ad-hoc
+        order both flags are recorded and named on the record (and
+        the test-surface flag is surfaced in red at the review
+        gate), but they do not by themselves fail the run: an
+        operator may legitimately scope work that includes tests.
+        That the checks sit at verification at all is defence in
+        depth — on any plan the validator accepted, the plan's
+        steps derive its scope and the tool port already refuses
+        edits outside it, so both checks are unreachable through
+        the ordinary run path and bite on any record where that
+        stops being true.
         """
+        gold = self.gold.get(order["gold_task_id"]) if order.get("gold_task_id") else None
+        is_gold = gold is not None
+        shape = patch_shape(pristine, patch_text, changed)
+        surface = test_surface_files(changed)
+        unplanned = unplanned_files(plan, changed)
+        base: dict = {
+            "test_surface_touched": bool(surface),
+            "test_surface_files": surface,
+            "planned_files": planned_files(plan),
+            "unplanned_files": unplanned,
+            "patch_shape": shape,
+            "visible_verdict": "not_run",
+            "hidden_verdict": "not_applicable" if not is_gold else "not_run",
+            "hidden_grading": {
+                "applicable": is_gold,
+                "verdict": "not_applicable" if not is_gold else "not_run",
+                "passed": None,
+                "reason": (
+                    "no hidden grading set exists for an ad-hoc work order"
+                    if not is_gold
+                    else "the hidden re-grade did not run"
+                ),
+                "grading_tests": [],
+                "grading_evidence": None,
+            },
+        }
+
+        def verdict(passed: bool, reason: str, **extra) -> dict:
+            return {"passed": passed, "reason": reason, **base, **extra}
+
         scope = set(plan["files"])
         out_of_scope = [f for f in changed if f not in scope]
         if out_of_scope:
-            return {
-                "passed": False,
-                "reason": f"patch touches files outside the approved scope: "
+            return verdict(
+                False,
+                f"patch touches files outside the approved scope: "
                 f"{out_of_scope}",
-                "out_of_scope": out_of_scope,
-            }
+                out_of_scope=out_of_scope,
+            )
+        if is_gold and surface:
+            return verdict(
+                False,
+                f"test_surface_touched: the patch touches test/grading "
+                f"surface files {surface} — a gold task's fix never "
+                f"lives in its tests, so a patch that edits the "
+                f"surface it is graded by fails verification",
+            )
+        if is_gold and unplanned:
+            return verdict(
+                False,
+                f"unplanned_files: the patch touches files no step of "
+                f"the approved plan named: {unplanned} — the plan's "
+                f"steps cover exactly this task's scope, so work "
+                f"outside them is scope creep, not a fix",
+            )
         if not changed:
-            return {"passed": False, "reason": "the run produced no patch"}
+            return verdict(False, "the run produced no patch")
+        if shape["whitespace_only"]:
+            return verdict(
+                False,
+                f"no_substantive_change: the patch changes only "
+                f"whitespace in {changed} — a patch exists, but no "
+                f"behaviour in it changed, so there is nothing to grade",
+            )
         verify_dir = pristine.parent / "verify"
         if verify_dir.exists():
             shutil.rmtree(verify_dir)
@@ -2041,36 +2145,102 @@ class CodingService:
         try:
             apply_patch(verify_dir, patch_text)
         except PatchError as exc:
-            return {"passed": False, "reason": f"patch does not apply cleanly: {exc}"}
+            return verdict(False, f"patch does not apply cleanly: {exc}")
         grading_paths = self._stage_grading(order, verify_dir)
         if not grading_paths:
-            return {
-                "passed": False,
-                "reason": "no grading tests named for this work order",
-            }
-        neutralised = self._neutralise_startup_files(verify_dir)
-        tools = SandboxTools(
-            verify_dir, scope=[], test_timeout=self.settings.policy.test_timeout_seconds
-        )
-        result = tools.run_tests(grading_paths, grading=True)
-        evidence = (result.detail or {}).get("grading")
-        if result.ok:
-            reason = "grading tests pass on the patched pristine copy"
-        elif result.code == "grading_not_fully_run":
-            reason = (
-                "grading tests did not all run and pass on the patched "
-                f"pristine copy (evidence: {evidence})"
+            return verdict(
+                False,
+                "no grading tests named for this work order",
             )
-        else:
-            reason = "grading tests fail on the patched pristine copy"
-        return {
-            "passed": result.ok,
-            "reason": reason,
+        neutralised = self._neutralise_startup_files(verify_dir)
+        result = self._run_grading(verify_dir, grading_paths)
+        evidence = (result.detail or {}).get("grading")
+        base["visible_verdict"] = "pass" if result.ok else "fail"
+        visible = {
             "grading_tests": grading_paths,
             "grading_output": result.output[-2000:],
             "grading_evidence": evidence,
             "neutralised_startup_files": neutralised,
         }
+        if not result.ok:
+            if result.code == "grading_not_fully_run":
+                reason = (
+                    "grading tests did not all run and pass on the patched "
+                    f"pristine copy (evidence: {evidence})"
+                )
+            else:
+                reason = "grading tests fail on the patched pristine copy"
+            return verdict(False, reason, **visible)
+        if not is_gold:
+            return verdict(
+                True,
+                "grading tests pass on the patched pristine copy",
+                **visible,
+            )
+        # Hidden re-grade (round 10): the visible set passed, so the
+        # same patched pristine copy is graded again — only now is
+        # the task's hidden grading file staged, into this copy,
+        # never into any workspace and never alongside the visible
+        # staging. A hidden failure flips the verdict to FAILED:
+        # the visible tests passing is no longer the whole claim.
+        assert gold is not None
+        hidden_paths = self._stage_hidden_grading(order, verify_dir)
+        if not hidden_paths:
+            base["hidden_verdict"] = "fail"
+            base["hidden_grading"] = {
+                "applicable": True,
+                "verdict": "fail",
+                "passed": False,
+                "reason": "the gold task names no hidden grading set",
+                "grading_tests": [],
+                "grading_evidence": None,
+            }
+            return verdict(
+                False,
+                "hidden_grading_failed: this gold task names no hidden "
+                "grading set, so its visible pass cannot be re-graded",
+                **visible,
+            )
+        hidden_neutralised = self._neutralise_startup_files(verify_dir)
+        hidden_result = self._run_grading(verify_dir, hidden_paths)
+        hidden_evidence = (hidden_result.detail or {}).get("grading")
+        base["hidden_verdict"] = "pass" if hidden_result.ok else "fail"
+        base["hidden_grading"] = {
+            "applicable": True,
+            "verdict": base["hidden_verdict"],
+            "passed": bool(hidden_result.ok),
+            "reason": (
+                "hidden grading tests pass on the patched pristine copy"
+                if hidden_result.ok
+                else "hidden grading tests fail on the patched pristine copy"
+            ),
+            "grading_tests": hidden_paths,
+            "grading_output": hidden_result.output[-2000:],
+            "grading_evidence": hidden_evidence,
+            "neutralised_startup_files": hidden_neutralised,
+        }
+        if hidden_result.ok:
+            return verdict(
+                True,
+                "grading tests pass on the patched pristine copy",
+                **visible,
+            )
+        return verdict(
+            False,
+            f"hidden_grading_failed: the patch passes the visible "
+            f"grading set but fails the hidden re-grade "
+            f"({hidden_paths}; evidence: {hidden_evidence})",
+            **visible,
+        )
+
+    def _run_grading(self, verify_dir: Path, grading_paths: list[str]):
+        """One isolated grading run (round 9's isolation) over the
+        named tests in the verification copy, returning the tool
+        result whose detail carries the JUnit evidence."""
+        tools = SandboxTools(
+            verify_dir, scope=[], test_timeout=self.settings.policy.test_timeout_seconds
+        )
+        return tools.run_tests(grading_paths, grading=True)
 
     @staticmethod
     def _neutralise_startup_files(verify_dir: Path) -> list[str]:
@@ -2105,6 +2275,22 @@ class CodingService:
             dest.write_text(gold.grading_source())
             return [gold.grading_relpath()]
         return list(order.get("grading_tests") or [])
+
+    def _stage_hidden_grading(self, order: dict, verify_dir: Path) -> list[str]:
+        """Place the hidden grading tests into the verification
+        copy — only at re-grade time, after the visible set has
+        passed on this same patched copy. The hidden file is never
+        staged into a run workspace, never staged alongside the
+        visible set, and never present in the target repo: it
+        exists in the eval area and, transiently, here. Ad-hoc
+        orders have no hidden set and return an empty list."""
+        gold = self.gold.get(order["gold_task_id"]) if order.get("gold_task_id") else None
+        if gold is None or not gold.hidden_grading_file:
+            return []
+        dest = verify_dir / gold.hidden_grading_relpath()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(gold.hidden_grading_source())
+        return [gold.hidden_grading_relpath()]
 
     # -- review gate -----------------------------------------------------------
     def decide_review(

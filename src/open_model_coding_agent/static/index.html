@@ -318,6 +318,15 @@ async function showDetail(id) {
     html += `<h3>Run ${esc(run.run_id)} — ${esc(run.status)}</h3>
       <div class="muted">steps: ${run.steps_used} · changed: ${(run.changed_files || []).map(esc).join(", ") || "none"}</div>
       <div>Verification: <span class="${v.passed ? "ok" : "bad"}">${esc(v.reason || "")}</span></div>`;
+    if (v.test_surface_touched) {
+      html += `<div class="bad" style="margin-top:6px">Test surface touched: this patch changes test/grading files (${(v.test_surface_files || []).map(esc).join(", ")}) — review it as a change to the tests themselves, not only to the code.</div>`;
+    }
+    if ((v.unplanned_files || []).length) {
+      html += `<div class="bad" style="margin-top:6px">Unplanned files: this patch changes files no step of the approved plan named (${(v.unplanned_files || []).map(esc).join(", ")}).</div>`;
+    }
+    if (v.hidden_verdict && v.hidden_verdict !== "not_applicable") {
+      html += `<div class="muted">visible grading: ${esc(v.visible_verdict || "")} · hidden re-grade: ${esc(v.hidden_verdict)}</div>`;
+    }
     if (c.total !== undefined) {
       html += `<div class="muted">cost: $${esc(c.total)} (plan $${esc(c.plan)} · execution $${esc(c.execution)})` +
         (b.max_tokens ? ` · budget: ${b.max_model_calls} calls / ${b.max_tokens} tokens / ${b.max_wall_seconds}s` : ``) +

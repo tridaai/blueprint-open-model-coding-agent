@@ -11,6 +11,7 @@ patch, whatever the agent says happened in its sandbox.
 from __future__ import annotations
 
 import difflib
+import re
 from pathlib import Path
 
 _EXCLUDED_DIRS = {"__pycache__", ".git", ".pytest_cache"}
@@ -49,6 +50,117 @@ def build_patch(pristine: Path, workspace: Path) -> tuple[str, list[str]]:
         )
         chunks.append("".join(diff))
     return "".join(chunks), changed
+
+
+def _patch_sections(patch_text: str) -> dict[str, list[str]]:
+    """Split a unified diff into per-file sections, keyed by the
+    ``+++ b/`` target path — the same split :func:`apply_patch`
+    makes."""
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in patch_text.splitlines(keepends=True):
+        if line.startswith("--- "):
+            continue
+        if line.startswith("+++ b/"):
+            current = line[len("+++ b/") :].strip()
+            sections[current] = []
+            continue
+        if line.startswith("+++ /dev/null"):
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return sections
+
+
+def _is_binary_bytes(data: bytes) -> bool:
+    return b"\x00" in data or _try_decode(data) is None
+
+
+def _try_decode(data: bytes) -> str | None:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def patch_shape(
+    pristine: Path, patch_text: str, changed: list[str]
+) -> dict:
+    """The patch's shape facts (round 10): what verification and
+    the review gate need to know about the patch as a change, apart
+    from whether its tests pass.
+
+    Per changed file: lines added and removed (counted from the
+    diff itself), and whether the file is binary — judged from the
+    pristine bytes and, where the patch applies cleanly in memory,
+    the patched bytes. Overall: whether the patch is ``empty``
+    (no changed files, no diff text) and whether it is
+    ``whitespace_only`` — every changed file's patched text equals
+    its pristine text once all whitespace is removed, so the
+    change cannot alter any behaviour. A file the shape cannot
+    reconstruct (a patch that does not apply) is never counted as
+    whitespace-only: an unreadable patch proves nothing.
+    """
+    sections = _patch_sections(patch_text)
+    per_file: list[dict] = []
+    total_added = 0
+    total_removed = 0
+    binary_files: list[str] = []
+    whitespace_only = bool(changed)
+    for rel in changed:
+        section = sections.get(rel, [])
+        added = sum(
+            1
+            for line in section
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        removed = sum(
+            1
+            for line in section
+            if line.startswith("-") and not line.startswith("---")
+        )
+        total_added += added
+        total_removed += removed
+        pristine_path = pristine / rel
+        old_bytes = pristine_path.read_bytes() if pristine_path.is_file() else b""
+        binary = _is_binary_bytes(old_bytes)
+        old_text = _try_decode(old_bytes)
+        new_text: str | None = None
+        if old_text is not None and section:
+            try:
+                new_text = _apply_to_text(old_text, section)
+            except PatchError:
+                new_text = None
+        elif old_text is not None:
+            new_text = old_text
+        if new_text is not None and _is_binary_bytes(new_text.encode("utf-8")):
+            binary = True
+        if binary:
+            binary_files.append(rel)
+        if (
+            new_text is None
+            or old_text is None
+            or re.sub(r"\s+", "", old_text) != re.sub(r"\s+", "", new_text)
+        ):
+            whitespace_only = False
+        per_file.append(
+            {
+                "file": rel,
+                "lines_added": added,
+                "lines_removed": removed,
+                "binary": binary,
+            }
+        )
+    return {
+        "files_changed": len(changed),
+        "per_file": per_file,
+        "lines_added": total_added,
+        "lines_removed": total_removed,
+        "empty": not changed and not patch_text.strip(),
+        "whitespace_only": whitespace_only if changed else False,
+        "binary_files": binary_files,
+        "any_binary": bool(binary_files),
+    }
 
 
 class PatchError(Exception):
