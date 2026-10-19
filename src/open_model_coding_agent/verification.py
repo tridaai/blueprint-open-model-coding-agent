@@ -96,9 +96,19 @@ def planned_files(plan: dict) -> list[str]:
     the set scope-creep detection compares the landed patch
     against. This is deliberately the *steps*, not the plan's
     derived ``files`` list: the steps are what a human approved,
-    step by step."""
+    step by step.
+
+    One fallback: a plan record with no ``steps`` key at all (a
+    pre-steps shape, as some older callers and tests still hand
+    the verifier) states its plan as its file list, so that list
+    is the planned set. A plan whose steps key is present but
+    empty names nothing — that is a different, stronger statement
+    and is taken at its word."""
+    steps = plan.get("steps")
+    if steps is None:
+        return list(plan.get("files") or [])
     planned: list[str] = []
-    for step in plan.get("steps") or []:
+    for step in steps:
         for name in step.get("files") or []:
             if name not in planned:
                 planned.append(name)

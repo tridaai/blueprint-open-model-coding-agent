@@ -103,6 +103,12 @@ def test_unplanned_files_compare_against_plan_steps_not_scope():
         "pkg/other.py"
     ]
     assert unplanned_files(plan, ["pkg/calc.py"]) == []
+    # A plan record with no steps key at all states its plan as its
+    # file list; a present-but-empty step list names nothing.
+    legacy = {"files": ["pkg/calc.py"]}
+    assert planned_files(legacy) == ["pkg/calc.py"]
+    assert unplanned_files(legacy, ["pkg/calc.py"]) == []
+    assert planned_files({"files": ["pkg/calc.py"], "steps": []}) == []
 
 
 def test_patch_shape_counts_lines_and_flags_binary(tmp_path):
