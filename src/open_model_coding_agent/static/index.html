@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open-Model Coding Agent — Trida AI Blueprint</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+         background: #ffffff; color: #0A0A0A; margin: 0; }
+  header, main, footer { max-width: 1020px; margin: 0 auto; padding: 0 20px; }
+  header { display: flex; align-items: center; gap: 14px; padding-top: 24px; }
+  header img { width: 44px; height: 44px; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 16px; margin: 28px 0 10px; }
+  .sub { color: #555; font-size: 13px; margin-top: 2px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border-bottom: 1px solid #E5E5EF; text-align: left; padding: 7px 8px;
+           vertical-align: top; }
+  th { color: #555; font-weight: 600; }
+  button { background: #4F46E5; color: #fff; border: 0; border-radius: 6px;
+           padding: 6px 12px; font-size: 13px; cursor: pointer; margin-right: 6px; }
+  button.secondary { background: #ECECF7; color: #0A0A0A; }
+  button.danger { background: #B91C1C; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .status { font-weight: 600; }
+  .ok { color: #15803D; } .bad { color: #B91C1C; } .mid { color: #B45309; }
+  pre { background: #F7F7FB; border: 1px solid #E5E5EF; border-radius: 8px;
+        padding: 12px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; }
+  .card { border: 1px solid #E5E5EF; border-radius: 10px; padding: 14px 16px;
+          margin: 12px 0; }
+  .muted { color: #555; font-size: 12px; }
+  footer { margin-top: 44px; padding-top: 18px; padding-bottom: 28px;
+           border-top: 1px solid #E5E5EF; display: flex; gap: 18px;
+           align-items: center; font-size: 13px; }
+  footer img { width: 28px; height: 28px; }
+  footer a { color: #4F46E5; text-decoration: none; }
+  #error { color: #B91C1C; font-size: 13px; min-height: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <img src="https://trida.ai/logos-rounded/trida-rounded.png" alt="Trida AI">
+  <div>
+    <h1>Open-Model Coding Agent</h1>
+    <div class="sub" id="readiness">loading…</div>
+  </div>
+</header>
+<main>
+  <div id="error"></div>
+
+  <h2>Gold tasks — the benchmark suite</h2>
+  <div id="gold"></div>
+
+  <h2>Work orders</h2>
+  <table>
+    <thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Scope</th><th></th></tr></thead>
+    <tbody id="orders"></tbody>
+  </table>
+
+  <div id="detail"></div>
+</main>
+<footer>
+  <img src="https://trida.ai/logos-rounded/trida-rounded.png" alt="Trida AI">
+  <span>Trida AI Blueprint — Open-Model Coding Agent</span>
+  <a href="https://trida.ai">Visit Trida AI →</a>
+  <a href="https://trida.ai/blog?category=blueprints">View all blueprints →</a>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let actor = "Console Reviewer";
+
+async function api(path, method = "GET", body = null) {
+  const res = await fetch(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : null,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || (res.status + " " + res.statusText));
+  return data;
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+async function loadReadiness() {
+  const r = await api("/readiness");
+  $("readiness").textContent =
+    `store: ${r.store} · model profile: ${r.model_profile}` +
+    (r.baseten_model ? ` · Baseten default slug: ${r.baseten_model}` : "");
+}
+
+async function loadGold() {
+  const tasks = await api("/api/gold-tasks");
+  $("gold").innerHTML = tasks.map((t) => `
+    <div class="card">
+      <strong>${esc(t.title)}</strong>
+      <span class="muted">(${esc(t.id)})</span>
+      <div>${esc(t.task_text)}</div>
+      <div class="muted">scope: ${t.file_scope.map(esc).join(", ")}</div>
+      <div style="margin-top:8px">
+        <button onclick="createFromGold('${esc(t.id)}')">Create work order</button>
+      </div>
+    </div>`).join("");
+}
+
+async function createFromGold(id) {
+  try {
+    const order = await api(`/api/work-orders/from-gold/${id}`, "POST");
+    await loadOrders();
+    await showDetail(order.work_order_id);
+  } catch (e) { showError(e); }
+}
+
+async function loadOrders() {
+  const orders = await api("/api/work-orders");
+  $("orders").innerHTML = orders.map((o) => `
+    <tr>
+      <td>${esc(o.work_order_id)}</td>
+      <td>${esc(o.title)}</td>
+      <td class="status">${esc(o.status)}</td>
+      <td>${o.file_scope.map(esc).join("<br>")}</td>
+      <td><button class="secondary" onclick="showDetail('${esc(o.work_order_id)}')">Open</button></td>
+    </tr>`).join("") || `<tr><td colspan="5" class="muted">No work orders yet.</td></tr>`;
+}
+
+function showError(e) { $("error").textContent = e.message || String(e); }
+function clearError() { $("error").textContent = ""; }
+
+async function act(path, body, id) {
+  clearError();
+  try {
+    await api(path, "POST", body);
+    await loadOrders();
+    await showDetail(id);
+  } catch (e) { showError(e); }
+}
+
+async function showDetail(id) {
+  clearError();
+  const d = await api(`/api/work-orders/${id}`);
+  const o = d.work_order, plan = d.plan, runs = d.runs || [];
+  const run = runs[runs.length - 1];
+  let html = `<h2>Work order ${esc(o.work_order_id)} — ${esc(o.title)}</h2>
+    <div class="card">
+      <div>${esc(o.task_text)}</div>
+      <div class="muted">status: <span class="status">${esc(o.status)}</span>
+        · target: ${esc(o.target_path)}</div>`;
+  if (!plan && o.status === "draft") {
+    html += `<div style="margin-top:10px">
+      <button onclick="act('/api/work-orders/${id}/plan', null, '${id}')">Draft plan</button></div>`;
+  }
+  if (plan) {
+    html += `<h3>Plan v${plan.version} (${esc(plan.status)})</h3>
+      <div>${esc(plan.approach)}</div>
+      <div class="muted">files: ${plan.files.map(esc).join(", ")} ·
+        tests: ${plan.tests.map(esc).join(", ")} · model: ${esc(plan.model_profile)}</div>`;
+    if (o.status === "plan_ready") {
+      html += `<div style="margin-top:10px">
+        <button onclick="decidePlan('${id}', true)">Approve plan</button>
+        <button class="danger" onclick="decidePlan('${id}', false)">Reject plan</button></div>`;
+    }
+  }
+  if (o.status === "approved") {
+    html += `<div style="margin-top:10px">
+      <button onclick="act('/api/work-orders/${id}/runs', null, '${id}')">Run the agent</button></div>`;
+  }
+  if (run) {
+    const v = run.verification || {};
+    html += `<h3>Run ${esc(run.run_id)} — ${esc(run.status)}</h3>
+      <div class="muted">steps: ${run.steps_used} · changed: ${(run.changed_files || []).map(esc).join(", ") || "none"}</div>
+      <div>Verification: <span class="${v.passed ? "ok" : "bad"}">${esc(v.reason || "")}</span></div>`;
+    if (run.patch) html += `<pre>${esc(run.patch)}</pre>`;
+    if (o.status === "succeeded") {
+      html += `<div style="margin-top:10px">
+        <button onclick="decideReview('${id}', true)">Accept patch</button>
+        <button class="danger" onclick="decideReview('${id}', false)">Reject patch</button></div>`;
+    }
+    if (o.status === "accepted") {
+      html += `<div class="ok" style="margin-top:8px">Accepted — the .patch file was exported to the run artifacts.</div>`;
+    }
+    if (o.status === "rejected") {
+      html += `<div class="bad" style="margin-top:8px">Rejected at review — the reason is on the audit trail.</div>`;
+    }
+  }
+  html += `<h3>Audit trail</h3><pre>` +
+    (d.audit || []).map((a) => `${a.created_at}  ${a.event}  by ${a.actor}`).join("\n") +
+    `</pre></div>`;
+  $("detail").innerHTML = html;
+}
+
+async function decidePlan(id, approve) {
+  await act(`/api/work-orders/${id}/plan/decide`,
+    { approve, actor, note: approve ? "approved in console" : "rejected in console" }, id);
+}
+
+async function decideReview(id, accept) {
+  await act(`/api/work-orders/${id}/review`,
+    { accept, actor, reason: accept ? null : "rejected in console" }, id);
+}
+
+loadReadiness(); loadGold(); loadOrders();
+</script>
+</body>
+</html>
