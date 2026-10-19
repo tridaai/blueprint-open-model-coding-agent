@@ -460,6 +460,41 @@ class BasetenModel(ModelPort):
             },
         ]
 
+    def prepare_resume(self, *, transcript: list[dict]) -> None:
+        """Rebuild the conversation from the stored transcript.
+
+        The wire history of the earlier attempt cannot be replayed
+        call for call — the shell's audit records summarise a step's
+        args rather than keep them verbatim — so the rebuild is a
+        faithful rendering of those records as one message: what was
+        called, how it came back, and the standing fact that the
+        workspace already holds the results. Entries from the
+        earlier attempt are marked seen, so the fold in next_step
+        only takes up entries the resumed attempt produces."""
+        self._seen = len(transcript)
+        if not transcript:
+            return
+        lines = [
+            "This run was interrupted and is now resuming. The tool "
+            "calls below were already made in the earlier attempt; "
+            "their results stand in the workspace. Do not redo work "
+            "that succeeded — continue from where they leave off."
+        ]
+        for entry in transcript:
+            args = json.dumps(entry.get("args") or {}, default=str)
+            if len(args) > 300:
+                args = args[:300] + "…"
+            outcome = f"ok={entry.get('ok')} refused={entry.get('refused', False)}"
+            if entry.get("code"):
+                outcome += f" error={entry['code']}"
+            output = str(entry.get("output") or "")
+            if len(output) > 500:
+                output = output[:500] + "…"
+            lines.append(
+                f"- {entry.get('tool')}({args}) -> {outcome}\n{output}"
+            )
+        self._messages.append({"role": "user", "content": "\n".join(lines)})
+
     def next_step(self, *, transcript: list[dict]) -> Step:
         # Fold the results of steps already returned into the wire
         # history before asking for anything new.

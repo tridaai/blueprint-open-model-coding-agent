@@ -172,6 +172,21 @@ async function showDetail(id) {
       <div class="muted">steps: ${run.steps_used} · changed: ${(run.changed_files || []).map(esc).join(", ") || "none"}</div>
       <div>Verification: <span class="${v.passed ? "ok" : "bad"}">${esc(v.reason || "")}</span></div>`;
     if (run.patch) html += `<pre>${esc(run.patch)}</pre>`;
+    if (run.interruption_reason) {
+      html += `<div class="bad" style="margin-top:8px">Interrupted — ${esc(run.interruption_reason)}` +
+        (run.last_checkpoint ? ` · last checkpoint: ${esc(run.last_checkpoint)}` : ``) + `</div>`;
+    }
+    if (run.partial_patch) {
+      html += `<div style="margin-top:8px">Partial patch from the abandoned run — the diff as far as it got` +
+        ` (files: ${(run.partial_files || []).map(esc).join(", ")}). It is not reviewable.</div>` +
+        `<pre>${esc(run.partial_patch)}</pre>`;
+    }
+    if (o.status === "interrupted") {
+      html += `<div style="margin-top:10px">
+        <button onclick="act('/api/work-orders/${id}/runs/${run.run_id}/resume', {actor}, '${id}')">Resume run</button>
+        <button class="secondary" onclick="act('/api/work-orders/${id}/runs/${run.run_id}/restart', {actor}, '${id}')">Restart run</button>
+        <button class="danger" onclick="abandonRun('${id}', '${run.run_id}')">Abandon run</button></div>`;
+    }
     if (o.status === "succeeded") {
       html += `<div style="margin-top:10px">
         <button onclick="decideReview('${id}', true)">Accept patch</button>
@@ -236,6 +251,12 @@ function planHtml(p, isLatest) {
     });
   }
   return html;
+}
+
+async function abandonRun(id, runId) {
+  const reason = prompt("Why is this run being abandoned?");
+  if (reason === null) return;
+  await act(`/api/work-orders/${id}/runs/${runId}/abandon`, {actor, reason}, id);
 }
 
 async function decidePlan(id, approve) {

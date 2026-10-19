@@ -21,6 +21,8 @@ from .models import (
     AmendPlanIn,
     PlanDecisionIn,
     ReviewDecisionIn,
+    RunAbandonIn,
+    RunActionIn,
     RunStartIn,
     WorkOrderIn,
 )
@@ -134,6 +136,20 @@ def create_app(settings=None) -> FastAPI:
         body = body or RunStartIn()
         return service.start_run(
             work_order_id, actor=body.actor, plan_version=body.plan_version
+        )
+
+    @app.post("/api/work-orders/{work_order_id}/runs/{run_id}/resume")
+    def resume_run(work_order_id: str, run_id: str, body: RunActionIn):
+        return service.resume_run(work_order_id, run_id, actor=body.actor)
+
+    @app.post("/api/work-orders/{work_order_id}/runs/{run_id}/restart")
+    def restart_run(work_order_id: str, run_id: str, body: RunActionIn):
+        return service.restart_run(work_order_id, run_id, actor=body.actor)
+
+    @app.post("/api/work-orders/{work_order_id}/runs/{run_id}/abandon")
+    def abandon_run(work_order_id: str, run_id: str, body: RunAbandonIn):
+        return service.abandon_run(
+            work_order_id, run_id, actor=body.actor, reason=body.reason
         )
 
     @app.post("/api/work-orders/{work_order_id}/review")

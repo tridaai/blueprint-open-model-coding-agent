@@ -168,6 +168,15 @@ class ModelPort:
     def start_run(self, *, work_order: dict, plan: dict) -> None:
         """Called once before the first step of a run."""
 
+    def prepare_resume(self, *, transcript: list[dict]) -> None:
+        """Called on a fresh adapter when a run resumes, after
+        :meth:`start_run`, with the run's stored transcript — the
+        tool calls the earlier attempt already made, rebuilt from
+        the audit records. Adapters that carry position or
+        conversational state rebuild it from those records here, so
+        completed work is not re-issued; adapters that derive
+        everything from the transcript itself need do nothing."""
+
     def next_step(self, *, transcript: list[dict]) -> Step:
         raise NotImplementedError
 
@@ -258,6 +267,13 @@ class OfflineScriptedModel(ModelPort):
             )
         queue.append(Step("finish", {}))
         self._queue = queue
+
+    def prepare_resume(self, *, transcript: list[dict]) -> None:
+        """The script is positional: one queue entry per step the
+        earlier attempt consumed, and the transcript holds exactly
+        one entry per consumed step. Drop that many — the work they
+        did stands in the workspace and is not re-issued."""
+        del self._queue[: len(transcript)]
 
     def next_step(self, *, transcript: list[dict]) -> Step:
         step = self._queue.pop(0) if self._queue else Step("finish", {})

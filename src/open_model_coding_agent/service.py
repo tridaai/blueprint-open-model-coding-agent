@@ -32,6 +32,23 @@ reason recorded, rather than crashing the shell.
 - A human reviews a SUCCEEDED run: accept exports the .patch file,
   reject records the reason. Nothing is ever applied to the source
   repo by the agent's hand.
+- Runs record checkpoints as they go — one after each landed edit,
+  one at each completed plan step — naming the workspace's digests,
+  the tool calls so far, and the usage so far. A run that dies
+  mid-flight (a transient model failure after retries, or a
+  process-level crash) lands INTERRUPTED with the last checkpoint
+  named, never a zombie 'running' row and never a silent FAILED;
+  terminal model errors (a bad key, an unknown slug) still end a
+  run FAILED, as resuming into the same wall would fail identically.
+  Resume is decided in code against three bases — the plan version
+  is still the approved one, the target repo still fingerprints as
+  approved, and the workspace still digests to the last checkpoint
+  — and any basis that moved refuses by name and offers restart
+  instead. Restart discards the workspace and runs fresh under the
+  same approval: an approval is not consumed by a run that did not
+  finish. Abandoning a run is a recorded act that names the partial
+  patch — the diff as far as it got — and a partial patch can never
+  reach the review gate.
 """
 
 from __future__ import annotations
@@ -53,6 +70,42 @@ from .tools import SandboxTools, dispatch
 
 _IGNORE = shutil.ignore_patterns("__pycache__", ".git", ".pytest_cache", "*.pyc")
 
+# Model failures that mean "the world hiccupped", not "the work is
+# wrong": the provider stayed rate-limited, overloaded, erroring, or
+# unreachable through the adapter's bounded retries. A run that dies
+# of one lands INTERRUPTED and may resume when the world recovers.
+# Terminal model errors — auth, an unknown slug, a rejected or
+# malformed exchange — are not in this set: they end the run FAILED,
+# as they did in round 2.
+_TRANSIENT_MODEL_CODES = frozenset(
+    {
+        "model_rate_limited",
+        "model_overloaded",
+        "model_server_error",
+        "model_unreachable",
+    }
+)
+
+
+class _RunProgress:
+    """Where a run has got to, tracked across attempts: the tool
+    calls made, the files landed edits touched, the plan steps those
+    edits completed, and the next checkpoint's index. A fresh run
+    starts empty; a resumed run is seeded from stored records."""
+
+    def __init__(
+        self,
+        *,
+        tool_calls: int = 0,
+        edited_files: list[str] | None = None,
+        stepped: set[int] | None = None,
+        next_index: int = 0,
+    ) -> None:
+        self.tool_calls = tool_calls
+        self.edited_files = list(edited_files or [])
+        self.stepped = set(stepped or set())
+        self.next_index = next_index
+
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
@@ -65,6 +118,7 @@ class CodingService:
         self.gold = GoldSuite(settings.gold_dir)
         for folder in (settings.targets_dir, settings.runs_dir, settings.artifacts_dir):
             folder.mkdir(parents=True, exist_ok=True)
+        self._reconcile_orphaned_runs()
 
     # -- audit ---------------------------------------------------------
     def _audit(self, entity: str, entity_id: str, event: str, actor: str, **detail):
@@ -85,6 +139,8 @@ class CodingService:
             )
 
     def _attach_usage(self, run: dict) -> dict:
+        """A run read carries its evidence with it: the usage rows
+        and totals, and the checkpoint history it recorded."""
         rows = self.store.list_usage(run_id=run["run_id"])
         run["usage"] = rows
         run["usage_totals"] = {
@@ -93,6 +149,7 @@ class CodingService:
             "completion_tokens": sum(r["completion_tokens"] for r in rows),
             "latency_ms": sum(r["latency_ms"] for r in rows),
         }
+        run["checkpoints"] = self.store.list_checkpoints(run["run_id"])
         return run
 
     def _make_model(self, *, scripts=None):
@@ -455,40 +512,95 @@ class CodingService:
                 f"plan (status {order['status']})",
             )
         self._refuse_if_stale(order, plan, actor)
+        return self._launch(order, plan, actor)
+
+    def _launch(
+        self,
+        order: dict,
+        plan: dict,
+        actor: str,
+        *,
+        resume_run: dict | None = None,
+    ) -> dict:
+        """Drive one run — fresh, or resumed from its interruption.
+
+        A fresh run copies the target twice (workspace + pristine)
+        and starts with an empty transcript. A resumed run reuses
+        its own workspace and pristine copy, rebuilds the transcript
+        from the stored tool-call records, and hands those records
+        to the model's resume hook, so completed steps are not
+        re-executed and landed edits are not re-applied.
+        """
+        work_order_id = order["work_order_id"]
         scripts: dict[str, list[dict]] = {}
         gold = self.gold.get(order["gold_task_id"]) if order.get("gold_task_id") else None
         if gold is not None:
             scripts[gold.id] = gold.scripted_edits
         model = self._make_model(scripts=scripts)
 
-        run_id = _new_id("run")
-        run_dir = self.settings.runs_dir / run_id
-        workspace = run_dir / "workspace"
-        pristine = run_dir / "pristine"
-        target = Path(order["target_path"])
-        if not target.is_dir():
-            raise GateError(
-                "target_missing", f"target repo {target} does not exist on disk"
+        if resume_run is None:
+            run_id = _new_id("run")
+            run_dir = self.settings.runs_dir / run_id
+            workspace = run_dir / "workspace"
+            pristine = run_dir / "pristine"
+            target = Path(order["target_path"])
+            if not target.is_dir():
+                raise GateError(
+                    "target_missing", f"target repo {target} does not exist on disk"
+                )
+            shutil.copytree(target, workspace, ignore=_IGNORE)
+            shutil.copytree(target, pristine, ignore=_IGNORE)
+            run = Run(
+                run_id=run_id,
+                work_order_id=work_order_id,
+                plan_version=plan["version"],
+                model_profile=self.settings.model_profile,
+                workspace=str(workspace),
+                created_at=utcnow(),
             )
-        shutil.copytree(target, workspace, ignore=_IGNORE)
-        shutil.copytree(target, pristine, ignore=_IGNORE)
-
-        run = Run(
-            run_id=run_id,
-            work_order_id=work_order_id,
-            plan_version=plan["version"],
-            model_profile=self.settings.model_profile,
-            workspace=str(workspace),
-            created_at=utcnow(),
-        )
-        self.store.put_run(run.model_dump())
-        self._set_status(order, "running")
-        self._audit(
-            "work_order", work_order_id, "run_started", actor,
-            run_id=run_id, plan_version=plan["version"],
-            model_profile=run.model_profile,
-        )
-        log_event("run_started", work_order_id=work_order_id, run_id=run_id)
+            self.store.put_run(run.model_dump())
+            transcript: list[dict] = []
+            progress = _RunProgress()
+            self._set_status(order, "running")
+            self._audit(
+                "work_order", work_order_id, "run_started", actor,
+                run_id=run_id, plan_version=plan["version"],
+                model_profile=run.model_profile,
+            )
+            log_event("run_started", work_order_id=work_order_id, run_id=run_id)
+        else:
+            run = Run(**resume_run)
+            run_id = run.run_id
+            workspace = Path(run.workspace)
+            pristine = workspace.parent / "pristine"
+            if not workspace.is_dir() or not pristine.is_dir():
+                raise GateError(
+                    "run_workspace_missing",
+                    f"run {run_id} cannot resume: its workspace "
+                    f"{run.workspace} is no longer on disk; restart instead",
+                )
+            transcript = self._stored_transcript(work_order_id, run_id)
+            checkpoints = self.store.list_checkpoints(run_id)
+            last = checkpoints[-1] if checkpoints else None
+            progress = _RunProgress(
+                tool_calls=len(transcript),
+                edited_files=list(last.get("edited_files") or []) if last else [],
+                stepped={
+                    c["step_index"] for c in checkpoints if c["kind"] == "step"
+                },
+                next_index=len(checkpoints),
+            )
+            run.status = "running"
+            run.interruption_reason = None
+            self.store.put_run(run.model_dump())
+            self._set_status(order, "running")
+            self._audit(
+                "work_order", work_order_id, "run_resumed", actor,
+                run_id=run_id, plan_version=run.plan_version,
+                from_checkpoint=run.last_checkpoint,
+                prior_tool_calls=len(transcript),
+            )
+            log_event("run_resumed", work_order_id=work_order_id, run_id=run_id)
 
         tools = SandboxTools(
             workspace,
@@ -496,12 +608,15 @@ class CodingService:
             test_timeout=self.settings.policy.test_timeout_seconds,
             plan_steps=plan.get("steps"),
         )
-        transcript: list[dict] = []
-        steps = 0
+        tools.edited_files = list(progress.edited_files)
+        steps = run.steps_used
         max_steps = self.settings.policy.max_steps
         model_error: GateError | None = None
+        crash: Exception | None = None
         try:
             model.start_run(work_order=order, plan=plan)
+            if resume_run is not None and transcript:
+                model.prepare_resume(transcript=transcript)
             while steps < max_steps:
                 step: Step = model.next_step(transcript=transcript)
                 self._persist_usage(model, work_order_id=work_order_id, run_id=run_id)
@@ -516,6 +631,7 @@ class CodingService:
                     **result.as_dict(),
                 }
                 transcript.append(entry)
+                progress.tool_calls += 1
                 self._audit(
                     "work_order", work_order_id, "tool_call", "agent",
                     run_id=run_id, tool=step.tool, ok=result.ok,
@@ -528,16 +644,26 @@ class CodingService:
                         run_id=run_id, path=(step.args or {}).get("path"),
                         reason=result.output,
                     )
+                if (
+                    step.tool == "edit_file"
+                    and result.ok
+                    and not result.refused
+                ):
+                    self._after_landed_edit(plan, run, progress, result)
         except GateError as exc:
-            # A model-side failure (auth, rate limit, a malformed
-            # response) ends the run FAILED with the reason recorded —
-            # never a hang, never a silent retry, never a crash that
-            # leaves the order 'running'.
+            # A model-side failure: how the run lands depends on the
+            # failure's kind, decided below — transient failures
+            # interrupt the run, terminal ones fail it. Either way
+            # the reason is recorded; never a hang, never a crash
+            # that leaves the order 'running'.
             model_error = exc
+            self._persist_usage(model, work_order_id=work_order_id, run_id=run_id)
+        except Exception as exc:  # a process-level death inside the loop
+            crash = exc
             self._persist_usage(model, work_order_id=work_order_id, run_id=run_id)
         run.steps_used = steps
 
-        if model_error is not None:
+        if model_error is not None and model_error.code not in _TRANSIENT_MODEL_CODES:
             reason = f"model call failed: {model_error.code} — {model_error.message}"
             run.status = "failed"
             run.failure_reason = reason
@@ -560,6 +686,44 @@ class CodingService:
             log_event(
                 "run_finished", work_order_id=work_order_id, run_id=run_id,
                 status="failed",
+            )
+            return self._attach_usage(run.model_dump())
+
+        if model_error is not None or crash is not None:
+            # The run died mid-flight. It lands INTERRUPTED with the
+            # last checkpoint it recorded named on its record — the
+            # basis a later resume is checked against — and the
+            # approval it ran under stands unconsumed.
+            if model_error is not None:
+                code = model_error.code
+                reason = (
+                    f"model call failed: {model_error.code} — "
+                    f"{model_error.message}"
+                )
+            else:
+                assert crash is not None
+                code = "unexpected_error"
+                reason = (
+                    f"the run died mid-flight: "
+                    f"{type(crash).__name__}: {crash}"
+                )
+            run.status = "interrupted"
+            run.interruption_reason = reason
+            self.store.put_run(run.model_dump())
+            self._set_status(order, "interrupted")
+            if model_error is not None:
+                self._audit(
+                    "work_order", work_order_id, "model_call_failed", "shell",
+                    run_id=run_id, code=code, reason=model_error.message,
+                )
+            self._audit(
+                "work_order", work_order_id, "run_interrupted", "shell",
+                run_id=run_id, code=code, reason=reason,
+                last_checkpoint=run.last_checkpoint, steps_used=steps,
+            )
+            log_event(
+                "run_interrupted", work_order_id=work_order_id, run_id=run_id,
+                reason=code,
             )
             return self._attach_usage(run.model_dump())
 
@@ -590,6 +754,365 @@ class CodingService:
         log_event(
             "run_finished", work_order_id=work_order_id, run_id=run_id,
             status=run.status,
+        )
+        return self._attach_usage(run.model_dump())
+
+    # -- checkpoints ---------------------------------------------------------
+    def _after_landed_edit(
+        self,
+        plan: dict,
+        run: Run,
+        progress: _RunProgress,
+        result,
+    ) -> None:
+        """A landed edit is a recovery boundary. Record the edit
+        checkpoint, then a step checkpoint for any plan step this
+        edit completes — a step is complete when every file it names
+        has taken a landed edit."""
+        path = (result.detail or {}).get("path")
+        if path and path not in progress.edited_files:
+            progress.edited_files.append(path)
+        plan_steps = plan.get("steps") or []
+        step_index = next(
+            (
+                index
+                for index, step in enumerate(plan_steps)
+                if path in (step.get("files") or [])
+            ),
+            0,
+        )
+        self._record_checkpoint(
+            plan, run, progress, kind="edit", step_index=step_index
+        )
+        edited = set(progress.edited_files)
+        for index, step in enumerate(plan_steps):
+            files = step.get("files") or []
+            if (
+                files
+                and all(name in edited for name in files)
+                and index not in progress.stepped
+            ):
+                progress.stepped.add(index)
+                self._record_checkpoint(
+                    plan, run, progress, kind="step", step_index=index
+                )
+
+    def _record_checkpoint(
+        self,
+        plan: dict,
+        run: Run,
+        progress: _RunProgress,
+        *,
+        kind: str,
+        step_index: int,
+    ) -> dict:
+        """One checkpoint record: the run, the plan step it reached,
+        the workspace state digest (per-file digests of the plan's
+        in-scope files), the tool calls so far, and the usage totals
+        so far. The workspace itself is not copied — the digest is
+        the record, and a resume checks the living workspace against
+        the last checkpoint's digests."""
+        usage_rows = self.store.list_usage(run_id=run.run_id)
+        record = {
+            "checkpoint_id": _new_id("cp"),
+            "run_id": run.run_id,
+            "work_order_id": run.work_order_id,
+            "index": progress.next_index,
+            "kind": kind,
+            "step_index": step_index,
+            "digests": file_digests(Path(run.workspace), list(plan["files"])),
+            "edited_files": list(progress.edited_files),
+            "tool_calls_so_far": progress.tool_calls,
+            "usage_totals": {
+                "calls": len(usage_rows),
+                "prompt_tokens": sum(r["prompt_tokens"] for r in usage_rows),
+                "completion_tokens": sum(
+                    r["completion_tokens"] for r in usage_rows
+                ),
+                "latency_ms": sum(r["latency_ms"] for r in usage_rows),
+            },
+            "created_at": utcnow(),
+        }
+        progress.next_index += 1
+        self.store.append_checkpoint(record)
+        run.last_checkpoint = record["checkpoint_id"]
+        self.store.put_run(run.model_dump())
+        return record
+
+    # -- failure recovery ------------------------------------------------------
+    def _stored_transcript(self, work_order_id: str, run_id: str) -> list[dict]:
+        """A run's transcript, rebuilt from its stored tool-call
+        records — the same entries the live loop carried (tool, the
+        summarised args, the tool's structured result), so a resumed
+        attempt's context is exactly what the records tell."""
+        transcript: list[dict] = []
+        for record in self.store.list_audit("work_order", work_order_id):
+            if record["event"] != "tool_call":
+                continue
+            detail = record["detail"]
+            if detail.get("run_id") != run_id:
+                continue
+            transcript.append(
+                {
+                    "tool": detail.get("tool"),
+                    "args": detail.get("args") or {},
+                    **(detail.get("result") or {}),
+                }
+            )
+        return transcript
+
+    def _reconcile_orphaned_runs(self) -> None:
+        """Runs execute synchronously inside one process, so a run
+        still standing at 'running' when a service is constructed
+        belonged to a process that died mid-run. Mark it INTERRUPTED
+        with the reason ``process_lost`` — never leave a zombie row,
+        never silently fail the run. Idempotent: a reconciled run is
+        no longer 'running', so a second boot changes nothing, and a
+        run a live process is driving is never visible here."""
+        for stored in self.store.runs_with_status("running"):
+            stored["status"] = "interrupted"
+            stored["interruption_reason"] = "process_lost"
+            self.store.put_run(stored)
+            order = self.store.get_work_order(stored["work_order_id"])
+            if order is not None and order["status"] == "running":
+                order["status"] = "interrupted"
+                order["updated_at"] = utcnow()
+                self.store.put_work_order(order)
+            self._audit(
+                "work_order", stored["work_order_id"], "run_interrupted",
+                "shell",
+                run_id=stored["run_id"], code="process_lost",
+                reason="the process driving this run died before it "
+                "finished",
+                last_checkpoint=stored.get("last_checkpoint"),
+            )
+            log_event(
+                "run_interrupted", work_order_id=stored["work_order_id"],
+                run_id=stored["run_id"], reason="process_lost",
+            )
+
+    def _require_run(self, order: dict, run_id: str | None) -> dict:
+        if run_id is not None:
+            run = self.store.get_run(run_id)
+            if run is None or run["work_order_id"] != order["work_order_id"]:
+                raise GateError(
+                    "unknown_run",
+                    f"work order {order['work_order_id']} has no run "
+                    f"{run_id!r}",
+                )
+            return run
+        run = self.store.latest_run(order["work_order_id"])
+        if run is None:
+            raise GateError(
+                "unknown_run",
+                f"work order {order['work_order_id']} has no runs",
+            )
+        return run
+
+    def resume_run(
+        self,
+        work_order_id: str,
+        run_id: str | None = None,
+        *,
+        actor: str = "console",
+    ) -> dict:
+        """Resume an interrupted run from its last checkpoint. The
+        basis is checked in code first (see :meth:`_resume_basis`);
+        only then does the run continue — in its own workspace, with
+        its context rebuilt from stored records."""
+        order = self._require_order(work_order_id)
+        run = self._require_run(order, run_id)
+        if run["status"] != "interrupted":
+            raise GateError(
+                "run_not_interrupted",
+                f"only an interrupted run can resume; run {run['run_id']} "
+                f"is {run['status']}",
+            )
+        plan = self._resume_basis(order, run, actor)
+        return self._launch(order, plan, actor, resume_run=run)
+
+    def _resume_basis(self, order: dict, run: dict, actor: str) -> dict:
+        """Decide whether a resume stands on the basis the run was
+        interrupted on. Three checks, in order: the plan version the
+        run started on is still the approved version; the target
+        repo still fingerprints as the world that plan was approved
+        against; and the run's workspace still digests to its last
+        checkpoint (or, with no checkpoint yet, to the pristine
+        copy). Any basis that moved refuses as
+        ``resume_basis_changed``, naming the basis, and is recorded
+        — restart is the offered path instead."""
+        work_order_id = order["work_order_id"]
+        plans = self.store.list_plans(work_order_id)
+        plan = plans[-1] if plans else None
+        basis: str | None = None
+        why = ""
+        if plan is None or plan["version"] != run["plan_version"]:
+            basis = "plan_superseded"
+            why = (
+                f"plan v{run['plan_version']}, the version this run "
+                f"started on, is no longer the latest version"
+            )
+        elif plan["status"] != "approved":
+            basis = "plan_not_approved"
+            why = f"plan v{plan['version']} no longer stands approved"
+        else:
+            stored = plan.get("scope_fingerprint")
+            current, current_digests = self._scope_fingerprint(order, plan)
+            if stored and current != stored:
+                drift = drifted_files(
+                    plan.get("scope_digests") or {}, current_digests
+                )
+                basis = "target_moved"
+                why = (
+                    "the target repo moved inside the approved scope "
+                    f"since approval (drifted: {', '.join(drift)})"
+                )
+        if basis is None:
+            assert plan is not None
+            workspace = Path(run["workspace"]) if run.get("workspace") else None
+            if workspace is None or not workspace.is_dir():
+                basis = "workspace_missing"
+                why = "the run's workspace is no longer on disk"
+            else:
+                checkpoints = self.store.list_checkpoints(run["run_id"])
+                if checkpoints:
+                    expected = checkpoints[-1].get("digests") or {}
+                else:
+                    expected = file_digests(
+                        workspace.parent / "pristine", list(plan["files"])
+                    )
+                current_digests = file_digests(workspace, list(plan["files"]))
+                if current_digests != expected:
+                    changed = drifted_files(expected, current_digests)
+                    basis = "workspace_changed"
+                    why = (
+                        "the run's workspace no longer matches its "
+                        "last checkpoint "
+                        f"(changed: {', '.join(changed)})"
+                    )
+        if basis is not None:
+            self._audit(
+                "work_order", work_order_id, "resume_refused", actor,
+                run_id=run["run_id"], basis=basis, reason=why,
+            )
+            raise GateError(
+                "resume_basis_changed",
+                f"resume refused: {why}; the run cannot continue on "
+                f"a basis that moved — restart it instead",
+            )
+        assert plan is not None
+        return plan
+
+    def restart_run(
+        self,
+        work_order_id: str,
+        run_id: str | None = None,
+        *,
+        actor: str = "console",
+    ) -> dict:
+        """Start over: discard the run's workspace and run fresh
+        under the same approved plan. The plan's approval was never
+        consumed by a run that did not finish, so the order stands
+        approved again and start_run's own checks — the approval,
+        the version pin, staleness — all re-apply to the fresh run.
+        What the discarded workspace held is summarised on the audit
+        trail; an abandoned run's partial patch stays on its record,
+        which is the durable copy."""
+        order = self._require_order(work_order_id)
+        run = self._require_run(order, run_id)
+        if run["status"] in ("succeeded", "running"):
+            raise GateError(
+                "run_not_restartable",
+                f"a {run['status']} run cannot be restarted; restart "
+                f"is for a run that did not finish (interrupted, "
+                f"failed, or abandoned)",
+            )
+        discarded: list[str] = []
+        workspace = Path(run["workspace"]) if run.get("workspace") else None
+        if workspace is not None and workspace.is_dir():
+            pristine = workspace.parent / "pristine"
+            if pristine.is_dir():
+                _text, discarded = build_patch(pristine, workspace)
+            shutil.rmtree(workspace.parent, ignore_errors=True)
+        if run.get("workspace"):
+            run["workspace"] = ""
+            self.store.put_run(run)
+        self._audit(
+            "work_order", work_order_id, "run_restarted", actor,
+            from_run_id=run["run_id"], plan_version=run["plan_version"],
+            discarded_files=discarded,
+        )
+        self._set_status(order, "approved")
+        return self.start_run(
+            work_order_id, actor=actor, plan_version=run["plan_version"]
+        )
+
+    def abandon_run(
+        self,
+        work_order_id: str,
+        run_id: str | None = None,
+        *,
+        actor: str,
+        reason: str,
+    ) -> dict:
+        """Give a run up, as a recorded act. Valid from interrupted,
+        failed, or (stopping it first) running; a SUCCEEDED run
+        refuses by name — it belongs to the review gate. If edits
+        had landed, the run's record names the partial patch: the
+        diff as far as it got, the files it touches, and the
+        checkpoint it reached. A partial patch is never submittable
+        to review (see decide_review)."""
+        order = self._require_order(work_order_id)
+        run = Run(**self._require_run(order, run_id))
+        if run.status == "succeeded":
+            raise GateError(
+                "run_not_abandonable",
+                f"run {run.run_id} succeeded; it goes to the review "
+                f"gate and cannot be abandoned",
+            )
+        if run.status == "abandoned":
+            raise GateError(
+                "run_not_abandonable",
+                f"run {run.run_id} is already abandoned",
+            )
+        if run.status == "running":
+            # A run standing at 'running' while an abandon lands is
+            # stopped first — as an interruption, on the record —
+            # and only then abandoned.
+            run.status = "interrupted"
+            run.interruption_reason = "stopped by the abandon that followed"
+            self.store.put_run(run.model_dump())
+            self._audit(
+                "work_order", work_order_id, "run_interrupted", "shell",
+                run_id=run.run_id, code="stopped_for_abandon",
+                reason="the run was stopped so it could be abandoned",
+                last_checkpoint=run.last_checkpoint,
+            )
+        workspace = Path(run.workspace) if run.workspace else None
+        if workspace is not None and workspace.is_dir():
+            pristine = workspace.parent / "pristine"
+            if pristine.is_dir():
+                partial_text, changed = build_patch(pristine, workspace)
+                if changed:
+                    run.partial_patch = partial_text
+                    run.partial_files = changed
+                    run.partial_checkpoint = run.last_checkpoint
+        run.status = "abandoned"
+        run.abandoned_by = actor
+        run.abandon_reason = reason
+        run.finished_at = run.finished_at or utcnow()
+        self.store.put_run(run.model_dump())
+        latest = self.store.latest_run(work_order_id)
+        if latest is not None and latest["run_id"] == run.run_id:
+            self._set_status(order, "abandoned")
+        self._audit(
+            "work_order", work_order_id, "run_abandoned", actor,
+            run_id=run.run_id, reason=reason,
+            partial_files=run.partial_files,
+            partial_checkpoint=run.partial_checkpoint,
+        )
+        log_event(
+            "run_abandoned", work_order_id=work_order_id, run_id=run.run_id
         )
         return self._attach_usage(run.model_dump())
 
@@ -661,6 +1184,16 @@ class CodingService:
     ) -> dict:
         order = self._require_order(work_order_id)
         run = self.store.latest_run(work_order_id)
+        if run is not None and run["status"] == "abandoned":
+            # A partial patch is evidence for the humans, never a
+            # submittable patch: the review gate takes SUCCEEDED
+            # runs only, and an abandoned run is refused by name.
+            raise GateError(
+                "partial_patch_not_reviewable",
+                f"run {run['run_id']} was abandoned; its partial patch "
+                f"cannot be reviewed or accepted — only a SUCCEEDED "
+                f"run reaches the review gate",
+            )
         if order["status"] != "succeeded" or run is None:
             raise GateError(
                 "no_verified_run_awaiting_review",
