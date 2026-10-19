@@ -232,10 +232,10 @@ def live_leg(suite: GoldSuite, scratch: Path, check) -> None:
     check(
         "live path: usage recorded from the API shape",
         len(api_rows) == len(usage) and len(run_rows) >= 2
-        and all(u["model"] == "zai-org/GLM-5" for u in api_rows)
+        and all(u["model"] == "zai-org/GLM-5.2" for u in api_rows)
         and run["usage_totals"]["prompt_tokens"] > 0,
         f"{len(api_rows)} api calls recorded ({len(run_rows)} on the run), "
-        f"all under zai-org/GLM-5",
+        f"all under zai-org/GLM-5.2",
     )
 
 
@@ -477,10 +477,11 @@ def cost_leg(suite: GoldSuite, scratch: Path, check) -> None:
     """Round 6: a live-path run priced end to end, and the suite
     fold printed. The eval records its own price table the way a
     deployment does — numbers it stands behind, published as a
-    version — because the repo's shipped table deliberately carries
-    unverified (null) prices. Usage per response is the recorded
-    shape: 120 prompt + 40 completion tokens; at $0.30/$0.90 per
-    million, one call costs exactly $0.000072."""
+    version — with its own round numbers, so the arithmetic below
+    is exact whatever the shipped catalog table (v2, priced from
+    the live read) says. Usage per response is the recorded shape:
+    120 prompt + 40 completion tokens; at $0.30/$0.90 per million,
+    one call costs exactly $0.000072."""
     task = suite.get("reserve-overcommit")
     prices_dir = scratch / "cost" / "prices"
     prices_dir.mkdir(parents=True)
@@ -492,7 +493,7 @@ def cost_leg(suite: GoldSuite, scratch: Path, check) -> None:
                 "as_of": "2026-10-19",
                 "source": "eval-recorded prices (a deployment's verified table)",
                 "prices": {
-                    "zai-org/GLM-5": {
+                    "zai-org/GLM-5.2": {
                         "input_per_mtok": "0.30",
                         "output_per_mtok": "0.90",
                     }

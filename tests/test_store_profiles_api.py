@@ -42,8 +42,8 @@ def test_baseten_profile_shape():
     profile = load_profile("baseten-glm")
     assert profile.base_url == "https://inference.baseten.co/v1"
     assert profile.api_key_env == "BASETEN_API_KEY"
-    assert profile.model == "zai-org/GLM-5"
-    assert profile.version == 1
+    assert profile.model == "zai-org/GLM-5.2"
+    assert profile.version == 2
 
 
 def test_live_profile_without_key_refuses_at_startup(tmp_path, monkeypatch):

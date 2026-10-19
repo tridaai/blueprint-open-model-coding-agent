@@ -29,7 +29,7 @@ from open_model_coding_agent.errors import ConfigError, GateError
 from open_model_coding_agent.prices import fold_usage, load_price_tables
 from open_model_coding_agent.service import CodingService
 
-GLM = "zai-org/GLM-5"
+GLM = "zai-org/GLM-5.2"
 # Per call in the live scripts below: 120 prompt + 40 completion
 # tokens at $0.30 / $0.90 per million = $0.000072 exactly.
 CALL_COST = Decimal("0.000072")
@@ -146,25 +146,37 @@ def run_gold(service):
 # -- the price table ---------------------------------------------------------
 
 
-def test_the_shipped_table_records_the_shortlist_unpriced():
+def test_the_shipped_tables_v1_unpriced_and_v2_priced_from_the_catalog():
     from open_model_coding_agent.config import REPO_ROOT
 
     tables = load_price_tables(REPO_ROOT / "prices")
-    assert set(tables) == {1}
-    table = tables[1]
-    assert table.currency == "USD"
-    assert "baseten.co" in table.source
-    # Every shortlist slug is recorded; none carries a price this
-    # repo has not verified — unverified is null, never invented.
-    assert set(table.prices) == {
+    assert set(tables) == {1, 2}
+    # V1 is history, untouched by the refresh: every slug it records
+    # is still unpriced — unverified was null, never invented, and a
+    # later version does not rewrite what earlier runs folded under.
+    v1 = tables[1]
+    assert set(v1.prices) == {
         "zai-org/GLM-5",
         "moonshotai/Kimi-K2.5",
         "deepseek-ai/DeepSeek-V3.1",
         "Qwen/Qwen3-Coder-480B-A35B-Instruct",
         "openai/gpt-oss-120b",
     }
-    assert all(price is None for price in table.prices.values())
-    assert table.price_for("some-org/Unlisted-1") is None  # unpriced, not an error
+    assert all(price is None for price in v1.prices.values())
+    # V2 prices exactly the five slugs the live catalog read
+    # verified, at the prices that read stated.
+    v2 = tables[2]
+    assert v2.currency == "USD"
+    assert v2.as_of == "2026-10-19"
+    assert "catalog" in v2.source and "baseten.co" in v2.source
+    assert v2.prices == {
+        "deepseek-ai/DeepSeek-V4-Flash-0731": (Decimal("0.13"), Decimal("0.26")),
+        "deepseek-ai/DeepSeek-V4-Pro-0813": (Decimal("1.32"), Decimal("3.96")),
+        "zai-org/GLM-5.2": (Decimal("1.40"), Decimal("4.40")),
+        "moonshotai/Kimi-K3": (Decimal("3.00"), Decimal("15.00")),
+        "openai/gpt-oss-120b": (Decimal("0.10"), Decimal("0.50")),
+    }
+    assert v2.price_for("some-org/Unlisted-1") is None  # unpriced, not an error
 
 
 def test_the_price_loader_refuses_records_it_does_not_understand(tmp_path):
@@ -435,13 +447,17 @@ def test_an_unpriced_run_counts_its_tokens_and_never_zeroes_them(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("BASETEN_API_KEY", "test-key")
+    # The shipped tables price five slugs; DeepSeek V4.1 Flash is
+    # in the deepseek profile's allowlist but not among them, so a
+    # run on it folds unpriced under the current table.
+    monkeypatch.setenv("BASETEN_MODEL", "deepseek-ai/DeepSeek-V4.1-Flash")
     settings = load_settings(
         sqlite_path=str(tmp_path / "db.sqlite"),
         targets_dir=tmp_path / "targets",
         runs_dir=tmp_path / "runs",
         artifacts_dir=tmp_path / "artifacts",
-        model_profile="baseten-glm",
-        # the shipped table: GLM is recorded, deliberately unpriced
+        model_profile="baseten-deepseek",
+        # the shipped tables: this slug carries no verified price
     )
     service = CodingService(settings)
     settings.model_transport = FakeTransport(gold_script(service))

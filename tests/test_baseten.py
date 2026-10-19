@@ -114,13 +114,16 @@ def test_plan_draft_over_the_wire():
     request = transport.requests[0]
     assert request["url"] == "https://inference.baseten.co/v1/chat/completions"
     assert request["headers"]["Authorization"] == "Bearer test-key"
-    assert request["json"]["model"] == "zai-org/GLM-5"
+    assert request["json"]["model"] == "zai-org/GLM-5.2"
     assert request["json"]["response_format"] == {"type": "json_object"}
+    # The completion ceiling on the wire is the profile record's,
+    # not a constant: a reasoning model reasons within it.
+    assert request["json"]["max_tokens"] == 8192
     usage = adapter.drain_usage()
     assert len(usage) == 1
     assert usage[0]["source"] == "api" and usage[0]["unit"] == "tokens"
     assert usage[0]["prompt_tokens"] == 11 and usage[0]["completion_tokens"] == 7
-    assert usage[0]["model"] == "zai-org/GLM-5"
+    assert usage[0]["model"] == "zai-org/GLM-5.2"
 
 
 def test_malformed_plan_replies_refuse_by_name():
@@ -292,7 +295,7 @@ def test_shipped_profiles_load_and_the_offline_default_is_intact():
         "baseten-gpt-oss",
     }
     assert profiles["offline"].kind == "offline"
-    assert profiles["baseten-kimi"].model == "moonshotai/Kimi-K2.5"
+    assert profiles["baseten-kimi"].model == "moonshotai/Kimi-K3"
     assert profiles["baseten-qwen"].model == "Qwen/Qwen3-Coder-480B-A35B-Instruct"
 
 
@@ -345,8 +348,8 @@ def test_loader_refuses_records_it_does_not_understand(tmp_path):
 
 def test_slug_overrides_are_bounded_by_the_profiles_own_allowlist(monkeypatch):
     glm = load_profile("baseten-glm")
-    pinned = apply_overrides(glm, model="zai-org/GLM-5")
-    assert pinned.model == "zai-org/GLM-5"
+    pinned = apply_overrides(glm, model="zai-org/GLM-5.3")
+    assert pinned.model == "zai-org/GLM-5.3"
     with pytest.raises(ConfigError, match="allowlist"):
         apply_overrides(glm, model="moonshotai/Kimi-K2.5")
 
@@ -422,7 +425,7 @@ def test_a_gold_task_runs_end_to_end_on_the_live_path(tmp_path, monkeypatch):
     run_usage = detail["runs"][0]["usage"]
     assert run_usage and all(u["source"] == "api" for u in run_usage)
     assert all(u["profile_id"] == "baseten-glm" for u in detail["usage"])
-    assert all(u["model"] == "zai-org/GLM-5" for u in detail["usage"])
+    assert all(u["model"] == "zai-org/GLM-5.2" for u in detail["usage"])
     assert detail["runs"][0]["usage_totals"]["prompt_tokens"] > 0
 
 
