@@ -333,6 +333,104 @@ class SqlStore:
             tuple(params),
         )
 
+    # -- benchmarks and the promotion gate ---------------------------------
+    def append_benchmark_run(self, record: dict) -> None:
+        """Benchmark records are append-only: a run over a set, once
+        recorded, is evidence — evaluations fold over it, nothing
+        rewrites it."""
+        self._write(
+            f"INSERT INTO benchmark_runs (benchmark_id, profile_id, "
+            f"set_name, task_set_hash, actor, payload, created_at) VALUES "
+            f"({self._ph}, {self._ph}, {self._ph}, {self._ph}, {self._ph}, "
+            f"{self._ph}, {self._ph})",
+            (
+                record["benchmark_id"],
+                record["profile_id"],
+                record["set_name"],
+                record["task_set_hash"],
+                record["actor"],
+                json.dumps(record),
+                record["created_at"],
+            ),
+        )
+
+    def list_benchmark_runs(self, profile_id: str | None = None) -> list[dict]:
+        if profile_id is None:
+            rows = self._all(
+                "SELECT payload FROM benchmark_runs ORDER BY created_at, benchmark_id"
+            )
+        else:
+            rows = self._all(
+                f"SELECT payload FROM benchmark_runs WHERE profile_id = {self._ph} "
+                f"ORDER BY created_at, benchmark_id",
+                (profile_id,),
+            )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def append_promotion_evaluation(self, record: dict) -> None:
+        """Evaluation records are append-only, like the benchmarks
+        they fold: a newer evaluation supersedes an older one by
+        being later, never by editing it."""
+        self._write(
+            f"INSERT INTO promotion_evaluations (evaluation_id, "
+            f"profile_id, set_name, task_set_hash, actor, payload, "
+            f"created_at) VALUES ({self._ph}, {self._ph}, {self._ph}, "
+            f"{self._ph}, {self._ph}, {self._ph}, {self._ph})",
+            (
+                record["evaluation_id"],
+                record["profile_id"],
+                record["set_name"],
+                record["task_set_hash"],
+                record["actor"],
+                json.dumps(record),
+                record["created_at"],
+            ),
+        )
+
+    def list_promotion_evaluations(
+        self, profile_id: str | None = None
+    ) -> list[dict]:
+        if profile_id is None:
+            rows = self._all(
+                "SELECT payload FROM promotion_evaluations "
+                "ORDER BY created_at, evaluation_id"
+            )
+        else:
+            rows = self._all(
+                f"SELECT payload FROM promotion_evaluations "
+                f"WHERE profile_id = {self._ph} "
+                f"ORDER BY created_at, evaluation_id",
+                (profile_id,),
+            )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def append_promotion_event(self, record: dict) -> None:
+        """The promotion history is append-only: promotions and
+        rollbacks are events, and the current default is derived
+        from the latest one — history is never rewritten to make a
+        default change look like it was always so."""
+        self._write(
+            f"INSERT INTO promotion_events (event_id, kind, "
+            f"from_profile, to_profile, actor, payload, created_at) "
+            f"VALUES ({self._ph}, {self._ph}, {self._ph}, {self._ph}, "
+            f"{self._ph}, {self._ph}, {self._ph})",
+            (
+                record["event_id"],
+                record["kind"],
+                record.get("from_profile"),
+                record["to_profile"],
+                record["actor"],
+                json.dumps(record),
+                record["created_at"],
+            ),
+        )
+
+    def list_promotion_events(self) -> list[dict]:
+        rows = self._all(
+            "SELECT payload FROM promotion_events ORDER BY seq"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
     # -- audit --------------------------------------------------------------
     def append_audit(
         self, entity: str, entity_id: str, event: str, actor: str, detail: dict
