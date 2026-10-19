@@ -1,0 +1,1 @@
+{"allowed_model_prefixes":["Qwen/"],"allowed_models":["Qwen/Qwen3-Coder-480B-A35B-Instruct"],"api_key_env":"BASETEN_API_KEY","base_url":"https://inference.baseten.co/v1","kind":"baseten","label":"Baseten Model API — Qwen (Qwen/Qwen3-Coder-480B-A35B-Instruct)","model":"Qwen/Qwen3-Coder-480B-A35B-Instruct","profile_id":"baseten-qwen","version":1}

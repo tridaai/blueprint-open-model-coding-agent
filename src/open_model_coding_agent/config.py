@@ -1,12 +1,18 @@
-"""Settings, policy, and model profiles.
+"""Settings and policy.
 
-The model layer is a profile: a named, versioned description of which
-model serves the agent and through which endpoint. The loader is
-fail-closed — an unknown profile name is a ConfigError, never a
-silent fallback. Round 1 ships two profiles: ``offline`` (the
-labelled scripted stand-in the tests, evals, and demo run) and
-``baseten`` (the live profile's shape — endpoint, key env, default
-slug; its adapter lands in round 2).
+Which model serves the agent is a profile: a named, versioned JSON
+record in the profiles directory (see :mod:`.profiles`). Settings
+resolve the named profile at load, fail-closed — an unknown profile
+name is a ConfigError, never a silent fallback. A live profile whose
+key env is unset refuses at startup, by name, for the same reason:
+the deployment asked for a live model, and quietly running the
+offline stand-in instead would be a lie about what served the work.
+
+Deployment overrides come from the environment and are validated
+against the profile's own record: ``BASETEN_MODEL`` may pin another
+slug only inside the selected profile's allowlist, and
+``BASETEN_BASE_URL`` may repoint the endpoint (another Baseten
+deployment of the same APIs). Neither can widen a profile.
 """
 
 from __future__ import annotations
@@ -16,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import ConfigError
+from .profiles import ModelProfile, apply_overrides
+from .profiles import load_profile as _load_profile_record
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -23,44 +31,9 @@ BASETEN_BASE_URL = "https://inference.baseten.co/v1"
 BASETEN_DEFAULT_MODEL = "zai-org/GLM-5"
 
 
-@dataclass(frozen=True)
-class ModelProfile:
-    """One servable model configuration."""
-
-    profile_id: str
-    label: str
-    kind: str  # "offline" | "baseten"
-    base_url: str | None = None
-    api_key_env: str | None = None
-    model: str | None = None
-
-
-PROFILES: dict[str, ModelProfile] = {
-    "offline": ModelProfile(
-        profile_id="offline",
-        label="Offline scripted model (labelled stand-in — no model is called)",
-        kind="offline",
-    ),
-    "baseten": ModelProfile(
-        profile_id="baseten",
-        label="Baseten Model API (live adapter lands in round 2)",
-        kind="baseten",
-        base_url=BASETEN_BASE_URL,
-        api_key_env="BASETEN_API_KEY",
-        model=BASETEN_DEFAULT_MODEL,
-    ),
-}
-
-
-def load_profile(profile_id: str) -> ModelProfile:
+def load_profile(profile_id: str, profiles_dir: Path | None = None) -> ModelProfile:
     """Resolve a profile by id, refusing unknown names loudly."""
-    try:
-        return PROFILES[profile_id]
-    except KeyError:
-        valid = ", ".join(sorted(PROFILES))
-        raise ConfigError(
-            f"unknown model profile {profile_id!r}; valid profiles: {valid}"
-        ) from None
+    return _load_profile_record(profile_id, profiles_dir or (REPO_ROOT / "profiles"))
 
 
 @dataclass(frozen=True)
@@ -76,6 +49,10 @@ class Settings:
     sqlite_path: str = "./data/codingagent.db"
     database_url: str | None = None
     model_profile: str = "offline"
+    profiles_dir: Path = field(default_factory=lambda: REPO_ROOT / "profiles")
+    # Test seam: an injected HTTP transport for the live adapter.
+    # Never set from the environment; production uses the real one.
+    model_transport: object | None = field(default=None, repr=False)
     migrations_dir: Path = field(default_factory=lambda: REPO_ROOT / "migrations")
     gold_dir: Path = field(default_factory=lambda: REPO_ROOT / "evals" / "gold")
     targets_dir: Path = field(default_factory=lambda: REPO_ROOT / "data" / "targets")
@@ -84,6 +61,9 @@ class Settings:
         default_factory=lambda: REPO_ROOT / "data" / "artifacts"
     )
     policy: Policy = field(default_factory=Policy)
+    _effective_profile: ModelProfile | None = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def store_kind(self) -> str:
@@ -91,7 +71,9 @@ class Settings:
 
     @property
     def profile(self) -> ModelProfile:
-        return load_profile(self.model_profile)
+        if self._effective_profile is not None:
+            return self._effective_profile
+        return load_profile(self.model_profile, self.profiles_dir)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -111,6 +93,7 @@ def load_settings(**overrides) -> Settings:
         "sqlite_path": os.environ.get("SQLITE_PATH", "./data/codingagent.db"),
         "database_url": os.environ.get("DATABASE_URL") or None,
         "model_profile": os.environ.get("MODEL_PROFILE", "offline"),
+        "profiles_dir": Path(os.environ.get("PROFILES_DIR", REPO_ROOT / "profiles")),
         "migrations_dir": Path(os.environ.get("MIGRATIONS_DIR", REPO_ROOT / "migrations")),
         "gold_dir": Path(os.environ.get("GOLD_DIR", REPO_ROOT / "evals" / "gold")),
         "targets_dir": Path(os.environ.get("TARGETS_DIR", REPO_ROOT / "data" / "targets")),
@@ -126,5 +109,20 @@ def load_settings(**overrides) -> Settings:
     env.update(overrides)
     settings = Settings(**env)
     # Fail closed at load: an unknown profile never reaches a run.
-    settings.profile
+    profile = settings.profile
+    if profile.is_live:
+        effective = apply_overrides(
+            profile,
+            model=os.environ.get("BASETEN_MODEL") or None,
+            base_url=os.environ.get("BASETEN_BASE_URL") or None,
+        )
+        settings._effective_profile = effective
+        # A live profile without its key refuses here, by name —
+        # never a silent fall back to the offline stand-in.
+        if not os.environ.get(effective.api_key_env or ""):
+            raise ConfigError(
+                f"model profile {effective.profile_id!r} is live and needs "
+                f"{effective.api_key_env} set in the environment; refusing "
+                f"to start without it (no silent fallback to offline)"
+            )
     return settings
