@@ -220,7 +220,7 @@ class SandboxTools:
             return ToolResult(True, "", detail={**detail, "truncated": False})
         start = 1 if start_line is None else start_line
         end = total_lines if end_line is None else end_line
-        if start < 1 or end < start:
+        if start < 1:
             return ToolResult(
                 False,
                 f"read refused: line range {start}-{end} is not a valid "
@@ -236,6 +236,14 @@ class SandboxTools:
                 f"start_line {start} is past the end",
                 refused=True,
                 code="line_range_out_of_bounds",
+                detail=detail,
+            )
+        if end < start:
+            return ToolResult(
+                False,
+                f"read refused: line range {start}-{end} runs backwards",
+                refused=True,
+                code="invalid_line_range",
                 detail=detail,
             )
         end = min(end, total_lines)
