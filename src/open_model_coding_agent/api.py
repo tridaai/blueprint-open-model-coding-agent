@@ -29,6 +29,9 @@ from .models import (
     RunAbandonIn,
     RunActionIn,
     RunStartIn,
+    TemplateIn,
+    TemplateInstantiateIn,
+    TemplatePublishIn,
     WorkOrderIn,
 )
 from .service import CodingService
@@ -144,6 +147,63 @@ def create_app(settings=None) -> FastAPI:
                 },
             )
         return report
+
+    # -- the task library (round 12) ---------------------------------------
+    @app.post("/api/templates", status_code=201)
+    def create_template(body: TemplateIn):
+        return service.create_template(body)
+
+    @app.get("/api/templates")
+    def templates():
+        return service.list_templates()
+
+    @app.get("/api/templates/{name}")
+    def template(name: str):
+        record = service.get_template(name)
+        if record is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "detail": f"no template {name!r}",
+                    "code": "unknown_template",
+                },
+            )
+        return record
+
+    @app.get("/api/templates/{name}/versions/{version}")
+    def template_version(name: str, version: int):
+        record = service.get_template(name, version)
+        if record is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "detail": f"no template {name!r} version {version}",
+                    "code": "unknown_template",
+                },
+            )
+        return record
+
+    @app.post("/api/templates/{name}/versions/{version}/publish")
+    def publish_template(name: str, version: int, body: TemplatePublishIn):
+        return service.publish_template(name, version, actor=body.actor)
+
+    @app.post("/api/templates/{name}/instantiate", status_code=201)
+    def instantiate_template(name: str, body: TemplateInstantiateIn):
+        return service.instantiate_template(
+            name,
+            version=body.version,
+            parameters=body.parameters,
+            actor=body.actor,
+            title=body.title,
+            target_path=body.target_path,
+            grading_tests=body.grading_tests,
+            gold_task_id=body.gold_task_id,
+            file_scope=body.file_scope,
+        )
+
+    @app.get("/api/templates/{name}/audit")
+    def template_audit(name: str):
+        return service.template_audit(name)
 
     # -- gold tasks ------------------------------------------------------
     @app.get("/api/gold-tasks")

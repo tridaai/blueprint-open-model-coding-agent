@@ -73,6 +73,14 @@ class WorkOrder(BaseModel):
     # in its context — it is how a reviewer's "send it back" reaches
     # the planner, as a stored record rather than a conversation.
     review_note: str | None = None
+    # Round 12: when this order was instantiated from a task
+    # template, its provenance travels on the record — the
+    # template's name and version, the parameter values used, and
+    # the substituted step skeleton the plan draft is shown. The
+    # skeleton is a snapshot taken at instantiation: a later
+    # template version can never rewrite what this order was
+    # instantiated from.
+    template: dict | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -110,6 +118,12 @@ class Plan(BaseModel):
     # against the version it supersedes, and who amended it.
     diff_from_previous: dict | None = None
     amended_by: str | None = None
+    # Round 12: when the draft was made with a task template's step
+    # skeleton in its context, the plan carries the label — the
+    # template's name and version, nothing more. The skeleton is
+    # draft context only; this plan was still drafted for this
+    # order and is still approved per order.
+    template_context: dict | None = None
     created_at: str = ""
 
 
@@ -245,6 +259,73 @@ class RollbackIn(BaseModel):
 
     actor: str
     rationale: str
+
+
+class TaskTemplate(BaseModel):
+    """A task template: a governed, versioned record in the task
+    library. The patterns are the template — a task text with named
+    parameters, a scope pattern naming the file shape an
+    instantiated order will carry, and a step skeleton that
+    arrives at plan drafting as labelled context. A version is
+    usable only once published, and publishing is an act by an
+    actor other than the version's author."""
+
+    template_id: str
+    name: str
+    version: int
+    description: str
+    task_text: str
+    parameters: list[str] = Field(default_factory=list)
+    scope_pattern: list[str] = Field(default_factory=list)
+    plan_steps: list[PlanStep] = Field(default_factory=list)
+    status: str = "draft"  # draft | published
+    author: str
+    published_by: str | None = None
+    published_at: str | None = None
+    created_at: str = ""
+
+
+class TemplateIn(BaseModel):
+    """A template version arrives as a creation act: its author,
+    its description of when to use it, and its patterns. The
+    version number is the library's to assign — the next one for
+    the name."""
+
+    name: str
+    description: str
+    task_text: str
+    parameters: list[str] = Field(default_factory=list)
+    scope_pattern: list[str]
+    steps: list[PlanStepIn]
+    author: str
+
+
+class TemplatePublishIn(BaseModel):
+    """Publishing is a recorded act: who publishes. The gate
+    refuses the version's own author — publishing is a second
+    person's judgement that the shape is sound."""
+
+    actor: str
+
+
+class TemplateInstantiateIn(BaseModel):
+    """Instantiation arrives as an act: which template (a named
+    version, or the latest published when version is omitted), the
+    parameter values, and where the order will work — the same
+    target choices an ad-hoc order has. No plan arrives with it:
+    a template can suggest a skeleton, never smuggle a plan."""
+
+    version: int | None = None
+    parameters: dict[str, str] = Field(default_factory=dict)
+    actor: str = "console"
+    title: str | None = None
+    target_path: str = ""
+    grading_tests: list[str] = Field(default_factory=list)
+    gold_task_id: str | None = None
+    # A caller may restate the scope it expects; it must equal the
+    # substituted scope pattern exactly. Anything else is an
+    # attempt to widen the template's scope at intake, refused.
+    file_scope: list[str] | None = None
 
 
 class ComparisonIn(BaseModel):

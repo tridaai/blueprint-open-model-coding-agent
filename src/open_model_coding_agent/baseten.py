@@ -447,6 +447,25 @@ class BasetenModel(ModelPort):
                         if work_order.get("_review_note")
                         else ""
                     )
+                    + (
+                        "\n\nThis order was instantiated from task "
+                        f"template {work_order['_template']['name']!r} "
+                        f"(version {work_order['_template']['version']}). "
+                        "The template suggests the step skeleton "
+                        "below as draft context — it is advisory "
+                        "only: return the plan you judge right for "
+                        "this order.\n"
+                        + "\n".join(
+                            f"{index + 1}. {step.get('intent', '')} "
+                            f"(files: {', '.join(step.get('files') or [])}; "
+                            f"tests: {', '.join(step.get('tests') or [])})"
+                            for index, step in enumerate(
+                                work_order.get("_template_steps") or []
+                            )
+                        )
+                        if work_order.get("_template")
+                        else ""
+                    )
                 ),
             },
         ]

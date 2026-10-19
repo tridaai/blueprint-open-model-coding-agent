@@ -227,6 +227,21 @@ class OfflineScriptedModel(ModelPort):
             for spec in (work_order.get("_plan_steps") or [])
         ]
         if not steps:
+            # Round 12: a template-instantiated order carries the
+            # template's substituted skeleton as draft context.
+            # The scripted drafter adopts the skeleton as its draft
+            # — the standing demonstration of what the context is
+            # for — and the draft still passes the shared validator
+            # and the per-order plan gate like any other.
+            steps = [
+                PlanStepDraft(
+                    intent=str(spec.get("intent") or ""),
+                    files=list(spec.get("files") or []),
+                    tests=list(spec.get("tests") or []),
+                )
+                for spec in (work_order.get("_template_steps") or [])
+            ]
+        if not steps:
             tests = list(work_order.get("grading_tests") or [])
             if gold_id and work_order.get("_grading_relpath"):
                 tests = tests or [work_order["_grading_relpath"]]
@@ -250,6 +265,11 @@ class OfflineScriptedModel(ModelPort):
                 # the service supplies one, is part of what this
                 # draft was shown — the accounting says so.
                 "review_note": work_order.get("_review_note"),
+                # Round 12: a task template's label and skeleton,
+                # when the service supplies them, are likewise part
+                # of what this draft was shown.
+                "template": work_order.get("_template"),
+                "template_steps": work_order.get("_template_steps"),
             },
             {"approach": draft.approach, "files": draft.files, "tests": draft.tests},
         )

@@ -70,6 +70,9 @@
   <h2>Shortlist comparison — the evidence, side by side</h2>
   <div id="comparisons"><div class="muted">loading…</div></div>
 
+  <h2>Task library — governed templates</h2>
+  <div id="templates"><div class="muted">loading…</div></div>
+
   <div id="detail"></div>
 </main>
 <footer>
@@ -319,6 +322,81 @@ async function loadQueue() {
     <div class="muted">${esc(h.derivation)}.</div>` : "";
 }
 
+async function loadTemplates() {
+  const records = await api("/api/templates");
+  if (!records.length) {
+    $("templates").innerHTML = `<div class="muted">No templates recorded.</div>`;
+    return;
+  }
+  $("templates").innerHTML = `
+    <table>
+      <thead><tr><th>Template</th><th>Version</th><th>Status</th><th>Author</th>
+        <th>Health (folded on read)</th><th></th></tr></thead>
+      <tbody>${records.map((t) => {
+        const h = t.health || {};
+        const health = `${h.orders_created} order(s) · ${h.runs_succeeded}/${h.runs} run(s) succeeded` +
+          (h.acceptance_rate === null || h.acceptance_rate === undefined
+            ? " · no reviews yet"
+            : ` · acceptance ${(Math.round(h.acceptance_rate * 100))}%`) +
+          (h.median_cost_per_success
+            ? ` · median cost per success $${esc(h.median_cost_per_success)}`
+            : " · no priced successes");
+        const publish = t.status === "draft"
+          ? `<button class="secondary" onclick="publishTemplate('${esc(t.name)}', ${t.version})">Publish</button>`
+          : "";
+        const instantiate = t.status === "published"
+          ? `<div style="margin-top:6px">
+               <input id="params-${esc(t.name)}-${t.version}" size="42"
+                 placeholder="parameters: ${(t.parameters || []).map(esc).join(", ")} — as key=value, key=value">
+               <input id="gold-${esc(t.name)}-${t.version}" size="18"
+                 placeholder="gold task id (optional)">
+               <button onclick="instantiateTemplate('${esc(t.name)}', ${t.version})">Instantiate</button>
+             </div>`
+          : "";
+        return `<tr>
+          <td><strong>${esc(t.name)}</strong><div class="muted">${esc(t.description)}</div>
+            <div class="muted">scope pattern: ${(t.scope_pattern || []).map(esc).join(", ")}</div>${instantiate}</td>
+          <td>v${t.version}</td>
+          <td class="status">${esc(t.status)}${t.published_by ? `<div class="muted">by ${esc(t.published_by)}</div>` : ""}</td>
+          <td>${esc(t.author)}</td>
+          <td>${health}</td>
+          <td>${publish}</td>
+        </tr>`;
+      }).join("")}
+      </tbody></table>
+    <div class="muted">A version is usable only once published, and publishing is an act by
+      someone other than its author. Instantiating creates an ordinary work order — the
+      template's step skeleton reaches the plan draft as labelled context, never as a plan.</div>`;
+}
+
+async function publishTemplate(name, version) {
+  clearError();
+  try {
+    await api(`/api/templates/${name}/versions/${version}/publish`, "POST", { actor });
+    await loadTemplates();
+  } catch (e) { showError(e); }
+}
+
+async function instantiateTemplate(name, version) {
+  clearError();
+  try {
+    const raw = ($(`params-${name}-${version}`) || {}).value || "";
+    const parameters = {};
+    raw.split(",").map((s) => s.trim()).filter(Boolean).forEach((pair) => {
+      const i = pair.indexOf("=");
+      if (i > 0) parameters[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
+    });
+    const gold = (($(`gold-${name}-${version}`) || {}).value || "").trim();
+    const order = await api(`/api/templates/${name}/instantiate`, "POST", {
+      version, parameters, actor,
+      gold_task_id: gold || null,
+    });
+    await loadOrders();
+    await loadTemplates();
+    await showDetail(order.work_order_id);
+  } catch (e) { showError(e); }
+}
+
 async function createFromGold(id) {
   try {
     const order = await api(`/api/work-orders/from-gold/${id}`, "POST");
@@ -349,6 +427,7 @@ async function act(path, body, id) {
     await loadOrders();
     await loadQueue();
     await loadCosts();
+    await loadTemplates();
     await showDetail(id);
   } catch (e) { showError(e); }
 }
@@ -364,6 +443,14 @@ async function showDetail(id) {
       <div>${esc(o.task_text)}</div>
       <div class="muted">status: <span class="status">${esc(o.status)}</span>
         · target: ${esc(o.target_path)}</div>`;
+  if (o.template) {
+    const params = Object.entries(o.template.parameters || {})
+      .map(([k, v]) => `${esc(k)}=${esc(v)}`).join(", ");
+    html += `<div class="muted">from task template <strong>${esc(o.template.name)}</strong>
+      v${o.template.version}${params ? ` — ${params}` : ""} — the template's step skeleton
+      is shown to the plan draft as labelled context; the plan itself is drafted and
+      approved for this order alone.</div>`;
+  }
   if (!plan && o.status === "draft") {
     html += `<div style="margin-top:10px">
       <button onclick="act('/api/work-orders/${id}/plan', null, '${id}')">Draft plan</button></div>`;
@@ -454,6 +541,11 @@ async function showDetail(id) {
     html += `<h3>Review packet</h3>
       <div class="muted">Assembled on read from the stored records — the same packet
         the API serves at <code>/api/work-orders/${esc(id)}/review-packet</code>.</div>`;
+    if (packet.template) {
+      html += `<div class="muted" style="margin-top:6px">Template provenance: this order was
+        instantiated from <strong>${esc(packet.template.name)}</strong> v${packet.template.version} —
+        provenance only; every gate this order passed is the ordinary one.</div>`;
+    }
     if (flags.test_surface_touched) {
       html += `<div class="bad" style="margin-top:6px">Risk: test surface touched (${(flags.test_surface_files || []).map(esc).join(", ")}) — this patch changes the tests it is graded by.</div>`;
     }
@@ -561,7 +653,7 @@ async function requestChanges(id) {
     { decision: "request_changes", actor, reason: note }, id);
 }
 
-loadReadiness(); loadGold(); loadOrders(); loadQueue(); loadCosts(); loadPromotion(); loadComparisons();
+loadReadiness(); loadGold(); loadOrders(); loadQueue(); loadCosts(); loadPromotion(); loadComparisons(); loadTemplates();
 </script>
 </body>
 </html>

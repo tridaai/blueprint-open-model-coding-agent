@@ -119,6 +119,29 @@ reason recorded, rather than crashing the shell.
   nothing and recommends nothing: the promotion gate remains the
   only path that moves the default, and the comparison record
   states that on its face.
+- The task library (round 12) holds the shapes of recurring work
+  as governed records: a template is a task-text pattern with
+  named parameters, a scope pattern, and a step skeleton, stored
+  versioned like a plan — an edit is a new version, never a
+  mutation. A version is usable only once published, and
+  publishing is an act by an actor other than its author:
+  separation of duties, as at the promotion gate. Instantiating a
+  template creates an ordinary work order through ordinary
+  intake — parameters are substituted and validated in code (a
+  value that lands in a path is a single path-segment token, so
+  it can widen nothing; the substituted scope is re-checked entry
+  by entry), the order carries the template's provenance and a
+  snapshot of the substituted skeleton, and from there the order
+  is indistinguishable from any other: same plan gate, same
+  sandbox, same verification. The skeleton arrives at drafting as
+  labelled context only — a template can suggest steps, never
+  smuggle a plan; the plan is still drafted, and still approved,
+  per order. Template health is a fold over the orders
+  instantiated from a version, computed on read, never a stored
+  counter. Publishing here is a human governed act — unlike the
+  model profiles, templates are not promoted through benchmark
+  evaluations; the evidence a template earns is its health fold,
+  and the judgement to publish stays a person's.
 """
 
 from __future__ import annotations
@@ -144,13 +167,32 @@ from .errors import ConfigError, GateError
 from .gold import GoldSuite
 from .logging_setup import log_event
 from .model_port import Step, make_model, validate_plan_draft
-from .models import Plan, PlanStep, Run, WorkOrder, WorkOrderIn
+from .models import (
+    Plan,
+    PlanStep,
+    Run,
+    TaskTemplate,
+    TemplateIn,
+    WorkOrder,
+    WorkOrderIn,
+)
 from .patch import PatchError, apply_patch, build_patch, patch_shape
 from .verification import planned_files, test_surface_files, unplanned_files
 from .plans import diff_plans, drifted_files, file_digests, scope_fingerprint
 from .prices import current_table, fold_usage, load_price_tables
 from .profiles import list_profiles
 from .store import SqlStore, utcnow
+from .templates import (
+    SEED_AUTHOR,
+    SEED_PUBLISHER,
+    check_substituted_scope,
+    path_parameters,
+    seed_template_specs,
+    substitute,
+    substitute_steps,
+    validate_parameter_values,
+    validate_template_shape,
+)
 from .tools import SandboxTools, dispatch
 
 _IGNORE = shutil.ignore_patterns("__pycache__", ".git", ".pytest_cache", "*.pyc")
@@ -247,6 +289,7 @@ class CodingService:
         for folder in (settings.targets_dir, settings.runs_dir, settings.artifacts_dir):
             folder.mkdir(parents=True, exist_ok=True)
         self._reconcile_orphaned_runs()
+        self._seed_templates()
 
     # -- audit ---------------------------------------------------------
     def _audit(self, entity: str, entity_id: str, event: str, actor: str, **detail):
@@ -443,6 +486,339 @@ class CodingService:
                 **total_fold.as_dict(successes=total_successes),
             },
         }
+
+    # -- the task library (round 12) ---------------------------------------
+    def _seed_templates(self) -> None:
+        """Ship the library's seed templates through the same
+        creation path as any template: created by the seed author,
+        published by the seed reviewer — separation of duties
+        holds for the seeds too. A name the deployment already has
+        (any version, any state) is left entirely alone: the seed
+        yields to the deployment's own template of that name."""
+        for spec in seed_template_specs():
+            if self.store.list_templates(spec["name"]):
+                continue
+            body = TemplateIn(
+                name=spec["name"],
+                description=spec["description"],
+                task_text=spec["task_text"],
+                parameters=list(spec["parameters"]),
+                scope_pattern=list(spec["scope_pattern"]),
+                steps=spec["steps"],
+                author=SEED_AUTHOR,
+            )
+            record = self.create_template(body)
+            self.publish_template(
+                record["name"], record["version"], actor=SEED_PUBLISHER
+            )
+
+    def create_template(self, body: TemplateIn) -> dict:
+        """Create a template version — a recorded act by its
+        author. The version number is the library's to assign: the
+        next for the name. The record starts unpublished; creating
+        a version never edits an earlier one."""
+        steps = [step.model_dump() for step in body.steps]
+        validate_template_shape(
+            name=body.name,
+            description=body.description,
+            task_text=body.task_text,
+            parameters=list(body.parameters),
+            scope_pattern=list(body.scope_pattern),
+            steps=steps,
+        )
+        existing = self.store.list_templates(body.name)
+        version = (existing[-1]["version"] + 1) if existing else 1
+        record = TaskTemplate(
+            template_id=_new_id("tpl"),
+            name=body.name,
+            version=version,
+            description=body.description,
+            task_text=body.task_text,
+            parameters=list(body.parameters),
+            scope_pattern=list(body.scope_pattern),
+            plan_steps=[PlanStep(**step) for step in steps],
+            author=body.author,
+            created_at=utcnow(),
+        )
+        self.store.put_template(record.model_dump())
+        self._audit(
+            "task_template",
+            record.name,
+            "template_created",
+            body.author,
+            template_id=record.template_id,
+            version=version,
+            parameters=record.parameters,
+        )
+        log_event(
+            "template_created", template=record.name, version=version,
+            actor=body.author,
+        )
+        return record.model_dump()
+
+    def publish_template(
+        self, name: str, version: int, *, actor: str
+    ) -> dict:
+        """Publish a template version — the act that makes it
+        instantiable. Publishing is a second person's judgement:
+        the version's own author is refused by name, on normalised
+        names, as at the promotion gate."""
+        record = self.store.get_template(name, version)
+        if record is None:
+            raise GateError(
+                "unknown_template",
+                f"no template {name!r} version {version} is recorded",
+            )
+        if record["status"] == "published":
+            raise GateError(
+                "template_already_published",
+                f"template {name!r} version {version} is already "
+                f"published (by {record.get('published_by')!r}) — "
+                f"publishing is an act, not a state to re-assert",
+            )
+        if normalise_actor(actor) == normalise_actor(record["author"]):
+            raise GateError(
+                "template_self_publish",
+                f"publishing refused: {actor!r} authored template "
+                f"{name!r} version {version} and cannot also "
+                f"publish it; publishing is a second person's "
+                f"judgement that the shape is sound",
+            )
+        record["status"] = "published"
+        record["published_by"] = actor
+        record["published_at"] = utcnow()
+        self.store.put_template(record)
+        self._audit(
+            "task_template",
+            name,
+            "template_published",
+            actor,
+            template_id=record["template_id"],
+            version=version,
+            author=record["author"],
+        )
+        log_event(
+            "template_published", template=name, version=version, actor=actor
+        )
+        return record
+
+    def get_template(
+        self, name: str, version: int | None = None
+    ) -> dict | None:
+        """One template record — the named version, or the latest
+        version of the name — with its health folded in on read."""
+        record = self.store.get_template(name, version)
+        if record is None:
+            return None
+        return {**record, "health": self.template_health(name, record["version"])}
+
+    def list_templates(self) -> list[dict]:
+        """Every template version on record, each with its health
+        folded in on read."""
+        return [
+            {
+                **record,
+                "health": self.template_health(
+                    record["name"], record["version"]
+                ),
+            }
+            for record in self.store.list_templates()
+        ]
+
+    def template_audit(self, name: str) -> list[dict]:
+        return self.store.list_audit("task_template", name)
+
+    def template_health(self, name: str, version: int) -> dict:
+        """A template version's health, folded on read from the
+        orders instantiated from it — never a stored counter, so
+        the fold can be re-derived and argued with. Counts: the
+        orders created; their runs by outcome (succeeded, failed,
+        interrupted, abandoned, still running); failures by the
+        same classes the review workbench names; review decisions
+        and the acceptance rate among decided reviews; and the
+        median priced cost of a verified success, over the
+        successes whose usage the price table actually priced —
+        unpriced successes are counted and kept out of the money."""
+        orders = [
+            order
+            for order in self.store.list_work_orders()
+            if (order.get("template") or {}).get("name") == name
+            and (order.get("template") or {}).get("version") == version
+        ]
+        runs: list[dict] = []
+        decisions = {"accepted": 0, "rejected": 0, "changes_requested": 0}
+        for order in orders:
+            runs.extend(self.store.list_runs(order["work_order_id"]))
+            for decision in self._review_decisions(order["work_order_id"]):
+                if decision["kind"] in decisions:
+                    decisions[decision["kind"]] += 1
+        by_status: dict[str, int] = {}
+        failures_by_class: dict[str, int] = {}
+        priced_costs: list[Decimal] = []
+        successes = 0
+        for run in runs:
+            by_status[run["status"]] = by_status.get(run["status"], 0) + 1
+            if run["status"] in ("failed", "interrupted"):
+                failure_class, _detail = self._run_failure_class(run)
+                failures_by_class[failure_class] = (
+                    failures_by_class.get(failure_class, 0) + 1
+                )
+            if run["status"] == "succeeded":
+                successes += 1
+                cost = run.get("cost") or {}
+                if int(cost.get("priced_calls") or 0) > 0:
+                    priced_costs.append(Decimal(str(cost.get("total", "0"))))
+        decided = decisions["accepted"] + decisions["rejected"]
+        return {
+            "orders_created": len(orders),
+            "runs": len(runs),
+            "runs_by_status": by_status,
+            "runs_succeeded": successes,
+            "failures_by_class": failures_by_class,
+            "reviews": decisions,
+            "acceptance_rate": (
+                decisions["accepted"] / decided if decided else None
+            ),
+            "priced_successes": len(priced_costs),
+            "median_cost_per_success": (
+                str(statistics.median(priced_costs)) if priced_costs else None
+            ),
+        }
+
+    def _resolve_template_version(
+        self, name: str, version: int | None
+    ) -> dict:
+        """The template version an instantiation will use. An
+        explicit version always serves if it is published; an
+        omitted one resolves to the latest published version.
+        Anything else refuses by name — an unpublished version can
+        be read and compared, never instantiated."""
+        versions = self.store.list_templates(name)
+        if not versions:
+            raise GateError(
+                "unknown_template", f"no template named {name!r} is recorded"
+            )
+        if version is not None:
+            record = next(
+                (r for r in versions if r["version"] == version), None
+            )
+            if record is None:
+                raise GateError(
+                    "unknown_template_version",
+                    f"template {name!r} has no version {version} — "
+                    f"recorded versions: {[r['version'] for r in versions]}",
+                )
+            if record["status"] != "published":
+                raise GateError(
+                    "template_not_published",
+                    f"instantiation refused: template {name!r} "
+                    f"version {version} is recorded but not "
+                    f"published; an unpublished version can be read "
+                    f"and compared, never instantiated",
+                )
+            return record
+        published = [r for r in versions if r["status"] == "published"]
+        if not published:
+            raise GateError(
+                "template_not_published",
+                f"instantiation refused: template {name!r} has no "
+                f"published version — publishing is the act that "
+                f"makes a version usable",
+            )
+        return published[-1]
+
+    def instantiate_template(
+        self,
+        name: str,
+        *,
+        version: int | None = None,
+        parameters: dict | None = None,
+        actor: str = "console",
+        title: str | None = None,
+        target_path: str = "",
+        grading_tests: list[str] | None = None,
+        gold_task_id: str | None = None,
+        file_scope: list[str] | None = None,
+    ) -> dict:
+        """Instantiate a template into an ordinary work order,
+        through ordinary intake. The parameters are substituted
+        into the template's patterns and validated on the way —
+        values that land in paths are single path-segment tokens,
+        the substituted scope is re-checked entry by entry, and a
+        caller restating a different scope is refused as widening.
+        The order carries the provenance and a snapshot of the
+        substituted skeleton; from creation on it is an ordinary
+        order — same plan gate, same sandbox, same verification.
+        No plan arrives with it: the skeleton will be shown to the
+        plan draft as labelled context, and the plan is still
+        drafted and approved per order."""
+        record = self._resolve_template_version(name, version)
+        steps_as_dicts = [dict(step) for step in record["plan_steps"]]
+        values = validate_parameter_values(
+            list(record["parameters"]),
+            dict(parameters or {}),
+            path_params=path_parameters(
+                list(record["scope_pattern"]), steps_as_dicts
+            ),
+        )
+        task_text = substitute(record["task_text"], values)
+        scope = [
+            substitute(entry, values) for entry in record["scope_pattern"]
+        ]
+        check_substituted_scope(scope)
+        skeleton = substitute_steps(steps_as_dicts, values)
+        if file_scope is not None and list(file_scope) != scope:
+            raise GateError(
+                "template_scope_widening_refused",
+                f"instantiation refused: the requested file scope "
+                f"{list(file_scope)} is not the scope the template "
+                f"pattern produces {scope} — a template's scope is "
+                f"part of the published record; widening it at "
+                f"intake would make the parameter check theatre",
+            )
+        provenance = {
+            "name": record["name"],
+            "version": record["version"],
+            "parameters": values,
+            "steps": skeleton,
+        }
+        default_title = record["name"] + (
+            " — "
+            + ", ".join(
+                f"{key}={values[key]}" for key in sorted(values)
+            )
+            if values
+            else ""
+        )
+        order = self.create_work_order(
+            WorkOrderIn(
+                title=title or default_title,
+                task_text=task_text,
+                file_scope=scope,
+                gold_task_id=gold_task_id,
+                grading_tests=list(grading_tests or []),
+                target_path=target_path,
+                requested_by=actor,
+            ),
+            actor=actor,
+            template_provenance=provenance,
+        )
+        self._audit(
+            "task_template",
+            name,
+            "template_instantiated",
+            actor,
+            template_id=record["template_id"],
+            version=record["version"],
+            work_order_id=order["work_order_id"],
+            parameters=values,
+        )
+        log_event(
+            "template_instantiated", template=name,
+            version=record["version"], work_order_id=order["work_order_id"],
+            actor=actor,
+        )
+        return order
 
     # -- benchmarks and the promotion gate ----------------------------------
     def benchmark_sets(self) -> dict:
@@ -1023,7 +1399,13 @@ class CodingService:
         return self.store.list_audit("work_order", work_order_id)
 
     # -- work orders ------------------------------------------------------
-    def create_work_order(self, body: WorkOrderIn, actor: str = "console") -> dict:
+    def create_work_order(
+        self,
+        body: WorkOrderIn,
+        actor: str = "console",
+        *,
+        template_provenance: dict | None = None,
+    ) -> dict:
         order = WorkOrder(
             work_order_id=_new_id("wo"),
             title=body.title,
@@ -1032,6 +1414,7 @@ class CodingService:
             gold_task_id=body.gold_task_id,
             grading_tests=list(body.grading_tests),
             requested_by=body.requested_by,
+            template=template_provenance,
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -1053,6 +1436,14 @@ class CodingService:
             title=order.title,
             gold_task_id=order.gold_task_id,
             file_scope=order.file_scope,
+            template=(
+                {
+                    "name": template_provenance["name"],
+                    "version": template_provenance["version"],
+                }
+                if template_provenance
+                else None
+            ),
         )
         log_event("work_order_created", work_order_id=order.work_order_id)
         return order.model_dump()
@@ -1161,6 +1552,21 @@ class CodingService:
         # planner, scripted or live, is shown what the reviewer
         # asked to change, as part of the order it plans against.
         plan_input["_review_note"] = order.get("review_note")
+        # Round 12: when the order was instantiated from a task
+        # template, the substituted skeleton rides into the draft's
+        # context under its own keys, labelled with the template it
+        # came from. It is context, never a plan: the draft still
+        # passes the shared validator, and the plan record carries
+        # the label so a reader can see the suggestion was there.
+        template_prov = order.get("template")
+        if template_prov:
+            plan_input["_template"] = {
+                "name": template_prov["name"],
+                "version": template_prov["version"],
+            }
+            plan_input["_template_steps"] = [
+                dict(step) for step in template_prov.get("steps") or []
+            ]
         gold = self.gold.get(order["gold_task_id"]) if order.get("gold_task_id") else None
         if gold is not None:
             plan_input["_plan_approach"] = gold.plan_approach
@@ -1182,6 +1588,14 @@ class CodingService:
             files=draft.files,
             tests=draft.tests,
             model_profile=self.serving_profile_id(),
+            template_context=(
+                {
+                    "name": template_prov["name"],
+                    "version": template_prov["version"],
+                }
+                if template_prov
+                else None
+            ),
             created_at=utcnow(),
         )
         self.store.put_plan(plan.model_dump())
@@ -1189,6 +1603,7 @@ class CodingService:
         self._audit(
             "work_order", work_order_id, "plan_drafted", actor,
             version=version, files=plan.files, model_profile=plan.model_profile,
+            template_context=plan.template_context,
         )
         return plan.model_dump()
 
@@ -2577,7 +2992,9 @@ class CodingService:
 
     def review_packet(self, work_order_id: str) -> dict | None:
         """Everything a reviewer decides from, assembled for one
-        order: the task and its scope; the approved plan the latest
+        order: the task and its scope, and the template provenance
+        when the order was instantiated from the library; the
+        approved plan the latest
         run ran on, with its fingerprint state; the patch and its
         shape; the verification record, with the risk flags lifted
         out and named distinctly — test surface touched, files no
@@ -2615,6 +3032,10 @@ class CodingService:
                 "gold_task_id": order.get("gold_task_id"),
                 "grading_tests": list(order.get("grading_tests") or []),
             },
+            # Round 12: the template provenance, when the order was
+            # instantiated from the library — the reviewer sees the
+            # shape this work came from, with the values used.
+            "template": order.get("template"),
             "plan": plan,
             "run": run,
             "patch": (run or {}).get("patch") or "",

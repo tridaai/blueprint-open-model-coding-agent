@@ -465,6 +465,79 @@ class SqlStore:
         )
         return [json.loads(r["payload"]) for r in rows]
 
+    # -- task templates (round 12) ---------------------------------------
+    def put_template(self, record: dict) -> None:
+        """A template version is written once at creation and once
+        at publishing (its status and publisher). Nothing else
+        ever updates it — an edit to a template is a new version,
+        so history is inserts plus the one governed status flip."""
+        payload = json.dumps(record)
+        existing = self._one(
+            f"SELECT template_id FROM task_templates WHERE name = {self._ph} "
+            f"AND version = {self._ph}",
+            (record["name"], record["version"]),
+        )
+        if existing:
+            self._write(
+                f"UPDATE task_templates SET status = {self._ph}, "
+                f"payload = {self._ph} WHERE name = {self._ph} "
+                f"AND version = {self._ph}",
+                (
+                    record["status"],
+                    payload,
+                    record["name"],
+                    record["version"],
+                ),
+            )
+        else:
+            self._write(
+                f"INSERT INTO task_templates (template_id, name, version, "
+                f"status, payload, created_at) VALUES ({self._ph}, "
+                f"{self._ph}, {self._ph}, {self._ph}, {self._ph}, "
+                f"{self._ph})",
+                (
+                    record["template_id"],
+                    record["name"],
+                    record["version"],
+                    record["status"],
+                    payload,
+                    record["created_at"],
+                ),
+            )
+
+    def get_template(
+        self, name: str, version: int | None = None
+    ) -> dict | None:
+        """One template version — the named one, or the latest
+        version of the name when version is omitted."""
+        if version is None:
+            row = self._one(
+                f"SELECT payload FROM task_templates WHERE name = {self._ph} "
+                f"ORDER BY version DESC",
+                (name,),
+            )
+        else:
+            row = self._one(
+                f"SELECT payload FROM task_templates WHERE name = {self._ph} "
+                f"AND version = {self._ph}",
+                (name, version),
+            )
+        return json.loads(row["payload"]) if row else None
+
+    def list_templates(self, name: str | None = None) -> list[dict]:
+        if name is None:
+            rows = self._all(
+                "SELECT payload FROM task_templates "
+                "ORDER BY name, version"
+            )
+        else:
+            rows = self._all(
+                f"SELECT payload FROM task_templates WHERE name = {self._ph} "
+                f"ORDER BY version",
+                (name,),
+            )
+        return [json.loads(r["payload"]) for r in rows]
+
     # -- audit --------------------------------------------------------------
     def append_audit(
         self, entity: str, entity_id: str, event: str, actor: str, detail: dict
