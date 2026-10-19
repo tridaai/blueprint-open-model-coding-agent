@@ -42,6 +42,15 @@ recorded-shape responses (no network, no key):
    self-promotion refused; promotion by a second actor; rollback;
    and a weak candidate whose worst run regresses refused. The
    task-set hash is checked against a drifted copy of the suite.
+9. SHORTLIST COMPARISON (round 8) — a comparison leg at small
+   scale (the held-out set) over a throwaway shortlist: the
+   offline profile and a copy run for real, a fake-transport live
+   profile runs the adapter's code path end to end and is priced
+   under the leg's own recorded price table, and a live profile
+   with no key in this environment is recorded not_servable with
+   its reason. The printed matrix is the folded report; the leg
+   checks the matrix, cost per successful task, the scripted
+   fold's label, and that the default did not move.
 
 Zero-tolerance counters: edits that landed outside the approved
 scope, and runs marked SUCCEEDED without a passing verification.
@@ -687,6 +696,186 @@ def promotion_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def comparison_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 8: the shortlist comparison, at small scale — the
+    held-out set over a throwaway shortlist. The offline profile
+    and a copy of it run for real; a live profile runs through the
+    fake transport the way the R2/R6 legs drive the adapter, priced
+    under a price table the leg records the way a deployment
+    would; a second live profile, whose key env is never set, must
+    land on the record as not_servable with its reason named."""
+    from open_model_coding_agent.benchmarks import BENCHMARK_SETS
+
+    profiles_dir = scratch / "comparison" / "profiles"
+    profiles_dir.mkdir(parents=True)
+    shutil.copy(REPO_ROOT / "profiles" / "offline.json", profiles_dir / "offline.json")
+    (profiles_dir / "offline-copy.json").write_text(
+        json.dumps(
+            {
+                "profile_id": "offline-copy",
+                "version": 1,
+                "label": "eval-throwaway offline copy",
+                "kind": "offline",
+            }
+        )
+    )
+    (profiles_dir / "fake-live.json").write_text(
+        json.dumps(
+            {
+                "profile_id": "fake-live",
+                "version": 1,
+                "label": "eval-throwaway fake-transport live profile",
+                "kind": "baseten",
+                "base_url": "https://inference.example.test/v1",
+                "api_key_env": "BASETEN_API_KEY",
+                "model": "acme/TestCoder-1",
+                "allowed_models": ["acme/TestCoder-1"],
+                "allowed_model_prefixes": ["acme/"],
+            }
+        )
+    )
+    (profiles_dir / "keyless-live.json").write_text(
+        json.dumps(
+            {
+                "profile_id": "keyless-live",
+                "version": 1,
+                "label": "eval-throwaway live profile, no key here",
+                "kind": "baseten",
+                "base_url": "https://inference.example.test/v1",
+                "api_key_env": "EVAL_KEYLESS_API_KEY",
+                "model": "other-org/Keyless-1",
+                "allowed_models": ["other-org/Keyless-1"],
+                "allowed_model_prefixes": ["other-org/"],
+            }
+        )
+    )
+    prices_dir = scratch / "comparison" / "prices"
+    prices_dir.mkdir(parents=True)
+    (prices_dir / "table-v1.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "currency": "USD",
+                "as_of": "2026-10-19",
+                "source": "eval-recorded prices (a deployment's verified table)",
+                "prices": {
+                    "acme/TestCoder-1": {
+                        "input_per_mtok": "0.30",
+                        "output_per_mtok": "0.90",
+                    }
+                },
+            }
+        )
+    )
+    script = []
+    for task_id in BENCHMARK_SETS[SET_HELD_OUT]:
+        task = suite.get(task_id)
+        script.append(
+            _chat(
+                content=json.dumps(
+                    {"approach": task.plan_approach, "steps": task.plan_steps}
+                )
+            )
+        )
+        calls = [_tool_call("c-read", "read_file", {"path": task.file_scope[0]})]
+        for index, edit in enumerate(task.scripted_edits):
+            calls.append(
+                _tool_call(
+                    f"c-edit-{index}",
+                    "edit_file",
+                    {"path": edit["path"], "old": edit["old"], "new": edit["new"]},
+                )
+            )
+        script.append(_chat(tool_calls=calls))
+        script.append(_chat(content="the repair is complete"))
+    os.environ.pop("EVAL_KEYLESS_API_KEY", None)
+    os.environ["BASETEN_API_KEY"] = "eval-fake-key"
+    try:
+        settings = load_settings(
+            sqlite_path=str(scratch / "comparison" / "codingagent.db"),
+            targets_dir=scratch / "comparison" / "targets",
+            runs_dir=scratch / "comparison" / "runs",
+            artifacts_dir=scratch / "comparison" / "artifacts",
+            profiles_dir=profiles_dir,
+            prices_dir=prices_dir,
+        )
+        settings.model_transport = _FakeTransport(script)
+        service = CodingService(settings)
+        report = service.run_comparison(set_name=SET_HELD_OUT, actor="Eval Comparer")
+    finally:
+        del os.environ["BASETEN_API_KEY"]
+    rows = {p["profile_id"]: p for p in report["profiles"]}
+    print("  comparison matrix (held-out set, folded from the stored records):")
+    for profile_id in ("offline", "offline-copy", "fake-live", "keyless-live"):
+        row = rows[profile_id]
+        cells = "  ".join(
+            f"{t['task_id']}={'✓' if t['verified_successes'] else ('—' if not t['attempts'] else '✗')}"
+            for t in row["per_task"]
+        )
+        cost = row["cost"]
+        priced = (
+            f"${cost['cost_per_successful_task']} per successful task"
+            if cost["cost_per_successful_task"] is not None
+            else f"cost per success not stated ({cost['pricing']})"
+        )
+        print(
+            f"    {profile_id}: {row['status']} · {cells} · "
+            f"successes {row['successes']} · {priced} · "
+            f"promotion standing {row['promotion']['evaluation_state']}"
+        )
+    check(
+        "comparison: the servable shortlist verified every task",
+        all(
+            rows[p]["successes"] == 2
+            and all(
+                t["verified_successes"] == 1 and t["attempts"] == 1
+                for t in rows[p]["per_task"]
+            )
+            for p in ("offline", "offline-copy", "fake-live")
+        )
+        and report["stale"] is False
+        and report["task_set_hash"] == task_set_hash(suite, SET_HELD_OUT),
+        "offline, its copy, and the fake-transport live profile each "
+        "verified 2/2 held-out tasks through the benchmark path",
+    )
+    keyless = rows["keyless-live"]
+    check(
+        "comparison: the keyless live profile is recorded, not skipped",
+        keyless["status"] == "not_servable"
+        and "EVAL_KEYLESS_API_KEY" in (keyless["reason"] or "")
+        and keyless["benchmark_ids"] == []
+        and service.list_benchmarks("keyless-live") == [],
+        f"keyless-live stands not_servable: {(keyless['reason'] or '')[:90]}",
+    )
+    fake_cost = rows["fake-live"]["cost"]
+    check(
+        "comparison: the live profile folds cost per successful task",
+        fake_cost["pricing"] == "priced"
+        and Decimal(fake_cost["priced_cost"]) == Decimal("0.000072") * 6
+        and Decimal(fake_cost["cost_per_successful_task"])
+        == Decimal("0.000216"),
+        f"fake-live: 6 priced calls (3 per task) = ${fake_cost['priced_cost']}, "
+        f"${fake_cost['cost_per_successful_task']} per successful task",
+    )
+    offline_cost = rows["offline"]["cost"]
+    check(
+        "comparison: the offline fold is labelled scripted, never priced",
+        offline_cost["pricing"] == "scripted"
+        and offline_cost["cost_per_successful_task"] is None
+        and offline_cost["unpriced_reasons"] == ["scripted_accounting"],
+        "offline cost per successful task is not stated — its accounting "
+        "is scripted characters, labelled, never priced as tokens",
+    )
+    check(
+        "comparison: producing it changed no governed state",
+        service.default_profile_id() == "offline"
+        and service.store.list_promotion_events() == []
+        and "promotion gate is the only path" in report["note"],
+        "the default is still offline, no promotion events exist, and "
+        "the record states the gate is the only path that changes it",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -770,6 +959,7 @@ def main() -> int:
     recovery_leg(suite, scratch, check)
     cost_leg(suite, scratch, check)
     promotion_leg(suite, scratch, check)
+    comparison_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
