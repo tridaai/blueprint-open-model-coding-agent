@@ -29,6 +29,12 @@ recorded-shape responses (no network, no key):
    model dies after its first edit lands INTERRUPTED with the last
    checkpoint named, then resumes to a verified success without
    re-applying the landed edit.
+7. BUDGETS + COST LEDGER (round 6) — a costing leg: a live-path run
+   priced end to end under a price table the eval records the way a
+   deployment would (verified numbers, published as a version),
+   split plan vs execution; the profile fold prints cost per
+   successful task; and an offline run folds as scripted accounting
+   — counted, never priced.
 
 Zero-tolerance counters: edits that landed outside the approved
 scope, and runs marked SUCCEEDED without a passing verification.
@@ -41,6 +47,7 @@ import os
 import shutil
 import sys
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -411,6 +418,120 @@ def recovery_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def cost_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 6: a live-path run priced end to end, and the suite
+    fold printed. The eval records its own price table the way a
+    deployment does — numbers it stands behind, published as a
+    version — because the repo's shipped table deliberately carries
+    unverified (null) prices. Usage per response is the recorded
+    shape: 120 prompt + 40 completion tokens; at $0.30/$0.90 per
+    million, one call costs exactly $0.000072."""
+    task = suite.get("reserve-overcommit")
+    prices_dir = scratch / "cost" / "prices"
+    prices_dir.mkdir(parents=True)
+    (prices_dir / "table-v1.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "currency": "USD",
+                "as_of": "2026-10-19",
+                "source": "eval-recorded prices (a deployment's verified table)",
+                "prices": {
+                    "zai-org/GLM-5": {
+                        "input_per_mtok": "0.30",
+                        "output_per_mtok": "0.90",
+                    }
+                },
+            }
+        )
+    )
+    calls = [_tool_call("c-read", "read_file", {"path": task.file_scope[0]})]
+    for index, edit in enumerate(task.scripted_edits):
+        calls.append(
+            _tool_call(
+                f"c-edit-{index}",
+                "edit_file",
+                {"path": edit["path"], "old": edit["old"], "new": edit["new"]},
+            )
+        )
+    script = [
+        _chat(
+            content=json.dumps(
+                {"approach": task.plan_approach, "steps": task.plan_steps}
+            )
+        ),
+        _chat(tool_calls=calls),
+        _chat(content="the repair is complete"),
+    ]
+    os.environ["BASETEN_API_KEY"] = "eval-fake-key"
+    try:
+        settings = load_settings(
+            sqlite_path=str(scratch / "cost" / "codingagent.db"),
+            targets_dir=scratch / "cost" / "targets",
+            runs_dir=scratch / "cost" / "runs",
+            artifacts_dir=scratch / "cost" / "artifacts",
+            model_profile="baseten-glm",
+            prices_dir=prices_dir,
+        )
+        settings.model_transport = _FakeTransport(script)
+        service = CodingService(settings)
+        order = service.create_gold_work_order(task.id, actor="evals")
+        wid = order["work_order_id"]
+        service.draft_plan(wid, actor="evals")
+        service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+        run = service.start_run(wid, actor="evals")
+    finally:
+        del os.environ["BASETEN_API_KEY"]
+    cost = run["cost"]
+    check(
+        "cost: the live run is priced, plan split from execution",
+        run["status"] == "succeeded"
+        and Decimal(cost["plan"]) == Decimal("0.000072")
+        and Decimal(cost["execution"]) == Decimal("0.000144")
+        and Decimal(cost["total"]) == Decimal("0.000216")
+        and cost["price_table_versions"] == [1],
+        f"plan ${cost['plan']} + execution ${cost['execution']} "
+        f"= ${cost['total']} under price table v1",
+    )
+    report = service.cost_report()
+    (profile,) = [p for p in report["profiles"] if p["profile_id"] == "baseten-glm"]
+    check(
+        "cost: cost per successful task folds the profile's spend",
+        profile["runs"] == 1
+        and profile["successful_tasks"] == 1
+        and Decimal(profile["cost_per_successful_task"]) == Decimal(cost["total"]),
+        f"baseten-glm: {profile['runs']} run(s), "
+        f"{profile['successful_tasks']} verified success(es), "
+        f"${profile['priced_cost']} priced spend, "
+        f"${profile['cost_per_successful_task']} per successful task",
+    )
+    print(
+        f"  suite fold: baseten-glm cost per successful task "
+        f"${profile['cost_per_successful_task']} "
+        f"(priced tokens {profile['priced_tokens']}, "
+        f"unpriced {profile['unpriced_tokens']})"
+    )
+
+    offline = _offline_service(scratch, "cost-offline")
+    order = offline.create_gold_work_order(task.id, actor="evals")
+    wid = order["work_order_id"]
+    offline.draft_plan(wid, actor="evals")
+    offline.decide_plan(wid, approve=True, actor="Eval Reviewer")
+    orun = offline.start_run(wid, actor="evals")
+    oreport = offline.cost_report()
+    (oprofile,) = [p for p in oreport["profiles"] if p["profile_id"] == "offline"]
+    check(
+        "cost: offline spend folds as scripted, never priced",
+        orun["status"] == "succeeded"
+        and Decimal(oprofile["priced_cost"]) == 0
+        and oprofile["scripted_chars"] > 0
+        and oprofile["successful_tasks"] == 1
+        and oprofile["unpriced_reasons"] == ["scripted_accounting"],
+        f"offline: {oprofile['scripted_chars']} scripted chars counted, "
+        f"$0 priced, {oprofile['successful_tasks']} verified success",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -492,6 +613,7 @@ def main() -> int:
     amendment_leg(suite, scratch, check)
     tool_depth_leg(suite, scratch, check)
     recovery_leg(suite, scratch, check)
+    cost_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
