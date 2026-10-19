@@ -177,17 +177,24 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–4 are built and gated: **75 tests passing, evals PASS**
+Rounds 1–5 are built and gated: **90 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
-gold task end to end through the Baseten adapter's code path and a
+gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
-run still lands its repair; counters at zero). The live adapter is exercised in tests and evals
+run still lands its repair, and an interruption leg where a run
+that dies after its first edit resumes to a verified success
+without re-applying it; counters at zero). Runs now record
+checkpoints as they work, and a run that dies mid-flight lands
+INTERRUPTED — resumable when its basis (plan, target, workspace)
+checks out in code, restartable under the same approval, or
+abandonable as a recorded act that names its partial patch, which
+the review gate can never accept. The live adapter is exercised in tests and evals
 through a fake transport replaying recorded-shape responses — it
 has **not yet been run against the real Baseten endpoint**, which
 needs a `BASETEN_API_KEY`; the first live smoke is a deployment
 step, and this status will say so until it has happened. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: failure recovery (round 5), budgets
+`docs/architecture.md`: budgets
 and the priced cost ledger (round 6), the model promotion gate
 (round 7), and the shortlist comparison (round 8). The Postgres
 profile is code-complete behind the store port (SQLite is the local

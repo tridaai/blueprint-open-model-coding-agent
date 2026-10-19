@@ -159,8 +159,13 @@ verification did not pass), and `rejected` (at review) as the other
 exits. Two round-3 transitions bend the line without breaking it:
 `approved → plan_ready` when a plan amendment lands (the new version
 awaits its own decision), and `approved → draft` when execution
-refuses a stale plan (a fresh plan must be drafted). The transitions
-are the gates:
+refuses a stale plan (a fresh plan must be drafted). Round 5 adds
+the recovery states: `running → interrupted` when a run dies
+mid-flight, `interrupted → running` on a resume that passes its
+basis checks, and `interrupted/failed → abandoned` when a human
+gives the run up. An approval is not consumed by a run that did not
+finish — resume and restart both stand on the approval already
+recorded. The transitions are the gates:
 
 - `start_run` requires status `approved` *and* an approved plan
   record; anything else is `plan_not_approved`. Naming a superseded
@@ -224,6 +229,55 @@ the verdict. A wrong-but-plausible repair therefore lands FAILED
 with the grading failure named — there is a test that proves exactly
 this.
 
+## Failure recovery, precisely
+
+**Checkpoints.** As a run works, the shell records an append-only
+checkpoint after each landed edit, and another at each completed
+plan step (a step is complete when every file it names has taken a
+landed edit). A checkpoint names the run, the plan step it reached,
+the per-file digests of the plan's in-scope files in the run's
+workspace, the tool calls so far, and the usage totals so far. The
+workspace is not copied per checkpoint — the digest is the record.
+
+**Interruption is a state, not an accident.** A run that dies
+mid-flight lands INTERRUPTED, with the reason and the last
+checkpoint named on its record: a transient model failure after the
+adapter's bounded retries (rate-limited, overloaded, server error,
+unreachable) or a process-level exception in the loop. Terminal
+model errors — a rejected key, an unknown slug, a malformed
+exchange — still land FAILED, as they did in round 2: resuming into
+the same wall would fail identically. And because runs execute
+synchronously inside one process, a run record still standing at
+`running` when a service boots belonged to a process that died
+mid-run; startup reconciliation marks it INTERRUPTED with the
+reason `process_lost`. No zombie rows, no silent failures.
+
+**Resume is decided in code.** An interrupted run may resume only
+on the basis it was interrupted on, checked in order: the plan
+version the run started on is still the approved version; the
+target repo still fingerprints as the world that plan was approved
+against; and the run's workspace still digests to its last
+checkpoint (or, before any checkpoint, to the pristine copy). Any
+basis that moved refuses as `resume_basis_changed`, naming the
+basis — `plan_superseded`, `target_moved`, `workspace_changed` —
+and the refusal is recorded. A resume that passes continues in the
+run's own workspace with its context rebuilt from the stored
+tool-call records: completed steps are not re-executed and landed
+edits are not re-applied.
+
+**Restart** discards the old workspace (what it held is summarised
+on the audit trail) and runs fresh, pinned to the same plan version,
+through start_run's ordinary checks — staleness included.
+
+**Abandon is a recorded act** — who, and why — valid from
+interrupted, failed, or running (a running run is stopped first,
+as an interruption). If edits had landed, the run's record names
+the **partial patch**: the diff as far as it got, the files it
+touches, and the checkpoint it reached. A partial patch is evidence
+for the humans, never a submittable patch: the review gate takes
+SUCCEEDED runs only, and an abandoned run is refused there by name
+(`partial_patch_not_reviewable`).
+
 ## Budgets (round 1 form)
 
 `Policy` carries the run's step ceiling (`CODINGAGENT_MAX_STEPS`,
@@ -236,7 +290,7 @@ round 7.
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
-staleness · R4 tool depth (this round) · R5 failure recovery · R6 budgets
+staleness · R4 tool depth · R5 failure recovery (this round) · R6 budgets
 + cost ledger · R7 model promotion gate · R8 shortlist comparison ·
 R9 injection red team · R10 verification depth · R11 review
 workbench · R12 task library · R13 challenge pass · R14 batch work
@@ -245,7 +299,7 @@ surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
 prod smoke).
 
-## Honest limits (round 4)
+## Honest limits (round 5)
 
 - The live Baseten adapter is built to Baseten's documented
   OpenAI-compatible shape and is exercised end to end in tests and
@@ -265,3 +319,9 @@ prod smoke).
   live conformance run is the release round's gate (R20), following
   the sibling blueprints' discipline of never claiming a profile
   that has not run.
+- A resumed live-model conversation is rebuilt from the stored
+  tool-call records — a faithful rendering of what was called and
+  how it came back — not a replay of the earlier attempt's wire
+  history, which the audit records deliberately summarise rather
+  than keep verbatim. The workspace, not the transcript, is the
+  ground truth a resume is checked against.

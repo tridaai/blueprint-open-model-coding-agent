@@ -268,9 +268,14 @@ def test_restart_discards_the_workspace_and_runs_fresh(
     wid, run = _interrupted(service, approved_order, model_factory)
     old_dir = Path(run["workspace"]).parent
     assert old_dir.is_dir()
+    # The fresh attempt runs under the same approval in a new
+    # workspace — here it dies the same way (the healthy-completion
+    # restart is covered by the workspace-refusal test above).
+    model_factory(lambda scripts: DiesAfterNCalls(scripts, die_on=3))
     fresh = service.restart_run(wid, run["run_id"], actor="tester")
     assert fresh["run_id"] != run["run_id"]
-    assert fresh["status"] == "succeeded"
+    assert fresh["status"] == "interrupted"
+    assert Path(fresh["workspace"]).parent != old_dir
     assert not old_dir.exists()
     old = service.store.get_run(run["run_id"])
     assert old["status"] == "interrupted"
@@ -278,7 +283,6 @@ def test_restart_discards_the_workspace_and_runs_fresh(
     restarts = [a for a in service.audit(wid) if a["event"] == "run_restarted"]
     assert restarts
     assert "workshop/inventory.py" in restarts[0]["detail"]["discarded_files"]
-    assert service.get_work_order(wid)["status"] == "succeeded"
 
 
 def test_restarting_a_succeeded_run_refuses(service, approved_order):
