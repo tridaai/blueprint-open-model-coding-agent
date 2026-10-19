@@ -62,7 +62,7 @@ cp .env.example .env   # then set BASETEN_API_KEY
   (`Qwen/Qwen3-Coder-480B-A35B-Instruct`), `baseten-gpt-oss`
   (`openai/gpt-oss-120b`). Every model call's usage — tokens and
   latency, from the provider's usage object — is recorded against
-  its run; that accounting is what the cost ledger (round 6) prices.
+  its run; that accounting is what the cost ledger prices.
 - **Profiles are governed data** — versioned JSON records in
   `profiles/`, loaded fail-closed: an unknown profile name, an
   unknown field in a record, or a slug outside a profile's own
@@ -137,6 +137,27 @@ make serve       # API + console on http://localhost:8000
 6. **Audit.** Every act — work order, plan, decision, tool call,
    refused edit, verification, review — is a stored record; a run's
    history reconstructs end to end.
+7. **Budgets and the cost ledger (round 6).** A run spends against
+   ceilings enforced in the shell — model calls, provider-measured
+   tokens, active wall-clock seconds — snapshotted onto the run at
+   start from `Policy` (`CODINGAGENT_MAX_MODEL_CALLS`,
+   `CODINGAGENT_MAX_TOKENS`, `CODINGAGENT_MAX_WALL_SECONDS`). The
+   loop checks the budget before every model call and after every
+   usage record lands; crossing a ceiling stops the run
+   INTERRUPTED with the ceiling named, and a budget-stopped run
+   cannot resume — restart, into a fresh budget, is its way back.
+   Every run's usage is priced by the **governed price table**
+   (`prices/table-v<N>.json`: versioned records, loaded
+   fail-closed, Decimal throughout) and stored on the run, split
+   plan vs execution — each usage row priced under the table
+   version stamped on it when it was recorded. The shipped table
+   records the shortlist's slugs with **null prices**: numbers this
+   repo has not verified are not invented, and an unpriced slug's
+   tokens are counted with the reason named, never zeroed. The
+   console folds all of it per profile into **cost per successful
+   task** — all of a profile's priced spend, failures included,
+   over its verified successes. The offline model's accounting is
+   characters, labelled `scripted` — never priced as tokens.
 
 ## The gold suite (v1)
 
@@ -167,6 +188,7 @@ src/open_model_coding_agent/  the governance shell (service, gates,
                               model port, Baseten adapter, store,
                               API, console)
 profiles/                     the model profiles, as versioned records
+prices/                       the governed price table, as versioned records
 workshop/                     the sample codebase the agent works on
 evals/gold/                   the gold task suite (broken/fixed/grading)
 evals/run_evals.py            the eval gate
@@ -177,25 +199,33 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–5 are built and gated: **90 tests passing, evals PASS**
+Rounds 1–6 are built and gated: **101 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
-run still lands its repair, and an interruption leg where a run
+run still lands its repair, an interruption leg where a run
 that dies after its first edit resumes to a verified success
-without re-applying it; counters at zero). Runs now record
+without re-applying it, and a costing leg that prices a live-path
+run plan-vs-execution and folds cost per successful task;
+counters at zero). Runs now record
 checkpoints as they work, and a run that dies mid-flight lands
 INTERRUPTED — resumable when its basis (plan, target, workspace)
 checks out in code, restartable under the same approval, or
 abandonable as a recorded act that names its partial patch, which
-the review gate can never accept. The live adapter is exercised in tests and evals
+the review gate can never accept. Runs also spend against enforced
+budgets (calls, tokens, active wall seconds — snapshotted at
+start; a budget-stopped run cannot resume, only restart into a
+fresh budget) and every run carries its priced cost from the
+governed price table. The shipped table's prices are null —
+unverified numbers are recorded as unverified, so live runs fold
+as unpriced (counted, reasoned, never zero) until a deployment
+publishes a table version with prices it verified. The live adapter is exercised in tests and evals
 through a fake transport replaying recorded-shape responses — it
 has **not yet been run against the real Baseten endpoint**, which
 needs a `BASETEN_API_KEY`; the first live smoke is a deployment
 step, and this status will say so until it has happened. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: budgets
-and the priced cost ledger (round 6), the model promotion gate
+`docs/architecture.md`: the model promotion gate
 (round 7), and the shortlist comparison (round 8). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance

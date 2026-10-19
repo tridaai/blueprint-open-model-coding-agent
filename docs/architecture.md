@@ -85,7 +85,8 @@ in code rather than prompted, and where the rounds go from here.
   tokens); the offline model's rows carry its own accounting
   (`source: scripted`, unit chars) so the two are never confused.
   Run reads fold their rows in, with totals — the raw material the
-  priced cost ledger (round 6) spends.
+  priced cost ledger spends. Each row is also stamped with the
+  price-table version in force when it was recorded.
 - **`tools.py` — the tool port.** The only hands the agent has,
   rooted at one run workspace. Every result is structured — `ok`,
   output, `refused`, a stable `code` naming a refusal, and a
@@ -278,20 +279,75 @@ for the humans, never a submittable patch: the review gate takes
 SUCCEEDED runs only, and an abandoned run is refused there by name
 (`partial_patch_not_reviewable`).
 
-## Budgets (round 1 form)
+## Budgets and the cost ledger (round 6)
 
-`Policy` carries the run's step ceiling (`CODINGAGENT_MAX_STEPS`,
-default 40) and the per-invocation test timeout
-(`CODINGAGENT_TEST_TIMEOUT`, default 120s). Priced budgets — token
-ceilings, the governed price table, cost per successful task — land
-in round 6; the promotion gate that spends them wisely lands in
-round 7.
+**Budgets are ceilings in code, snapshotted per run.** `Policy`
+carries the step ceiling (`CODINGAGENT_MAX_STEPS`, default 40), the
+per-invocation test timeout (`CODINGAGENT_TEST_TIMEOUT`, default
+120s), and — since round 6 — the priced budgets:
+`CODINGAGENT_MAX_MODEL_CALLS` (200), `CODINGAGENT_MAX_TOKENS`
+(2,000,000), and `CODINGAGENT_MAX_WALL_SECONDS` (1800). A run copies
+the three onto its own record at start; from then on the snapshot
+rules the run. The loop checks the budget **before every model
+call** (at a ceiling, the call is not made) and **after every usage
+record lands** (the call that just landed may itself have crossed
+the token ceiling — the run stops there, so the overshoot is that
+single in-flight call, never more). Tokens are the provider's
+measured tokens only; the scripted model's character accounting is
+not tokens and can never trip the token ceiling. Wall seconds are
+the run's *active* seconds, accumulated across attempts — time an
+interrupted run spends waiting on a human is not its wall clock.
+
+Crossing a ceiling stops the run **INTERRUPTED** with the ceiling
+named on the record (`budget_stop`) and on the audit trail
+(`budget_exhausted`, with ceiling, limit, and spend). The work is
+not wrong; the spend is done. A budget-stopped run **cannot
+resume** — resume spends against the same run's accumulated usage,
+and that budget is already spent, so resume refuses by the budget's
+own name (`budget_exhausted`). Its way back is **restart**, which
+snapshots a fresh budget from the policy in force. A resumed
+(non-budget) run likewise keeps its original snapshot and its
+accumulated usage: recovery never refreshes a budget.
+
+**The price table is governed data.** `prices/table-v<N>.json`
+records, per model slug, an input and output price per million
+tokens as decimal strings, with a currency (USD), an `as_of` date,
+and a source note. The loader is fail-closed in the profiles'
+mould: unknown fields, a float price, a half-priced slug, or a
+version that disagrees with its file name each refuse by name at
+startup. Changing a price publishes a **new version** alongside the
+old; versions are never edited in place. Every usage row is
+stamped, at record time, with the version in force (migration
+0004), and every fold prices each row under its own version — a
+historical run keeps the prices it was costed under even after the
+table moves on. The shipped v1 records the shortlist's five slugs
+with **null prices**: numbers this repo has not verified are not
+invented, and a null price folds as unpriced.
+
+**The ledger.** All money is `Decimal`; no float touches it. A run
+stores its cost fold at every landing: `total`, split into `plan`
+(the drafting of its work order's plan — the order's plan-phase
+usage rows; an order's runs share the one drafting) and `execution`
+(the run's own rows). A row enters the money only when it is
+provider accounting (source `api`, unit `tokens`) priced under its
+stamped version for its slug. Everything else is **counted, with
+its reason named, and kept out of the money**: `no_price_recorded`,
+`price_table_version_unrecorded`,
+`price_table_version_missing` — and `scripted_accounting`, the
+offline model's characters, which are never priced as tokens and
+never estimated into tokens. The suite fold (`cost_report`, served
+at `GET /api/costs` and rendered in the console) groups runs and
+usage by profile: runs, verified successes, priced spend, and
+**cost per successful task** — ALL of the profile's priced spend,
+failures and interruptions included, divided by its verified
+SUCCEEDED runs. That is the webinar's headline metric, and it is
+honest only with the failures in the numerator.
 
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
-staleness · R4 tool depth · R5 failure recovery (this round) · R6 budgets
-+ cost ledger · R7 model promotion gate · R8 shortlist comparison ·
+staleness · R4 tool depth · R5 failure recovery · R6 budgets
++ cost ledger (this round) · R7 model promotion gate · R8 shortlist comparison ·
 R9 injection red team · R10 verification depth · R11 review
 workbench · R12 task library · R13 challenge pass · R14 batch work
 orders · R15 observability · R16 deployment profiles · R17 MCP
@@ -299,7 +355,7 @@ surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
 prod smoke).
 
-## Honest limits (round 5)
+## Honest limits (round 6)
 
 - The live Baseten adapter is built to Baseten's documented
   OpenAI-compatible shape and is exercised end to end in tests and
