@@ -176,6 +176,25 @@ make serve       # API + console on http://localhost:8000
    rollback are append-only events, and the console shows the
    whole gate — sets and hashes, evaluations, history — beside
    the cost fold.
+9. **The shortlist comparison (round 8).** A comparison runs
+   **every** recorded profile — the five Baseten family profiles
+   and the offline profile — once over the same benchmark set
+   (the tuning set by default, for breadth; the set and its
+   content hash are named on the record) through the same
+   benchmark path, under one actor, and stores the comparison as
+   a record. A profile that cannot serve in this environment —
+   a live profile with no key set — is recorded `not_servable`
+   with the reason named: never skipped, never faked. The report
+   folds the stored records into the evidence matrix: verified
+   successes per task, total usage, priced cost and **cost per
+   successful task** where the price table prices the slug
+   (unpriced folds are labelled, never zero), failure classes,
+   and each profile's promotion standing read from the gate's
+   records. The report ranks nothing and changes nothing —
+   recomputing it is a pure derivation, a comparison whose set
+   has moved reads as stale, and the record states on its face
+   that the promotion gate is the only path that changes the
+   default.
 
 ## The gold suite (v1)
 
@@ -222,18 +241,22 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–7 are built and gated: **109 tests passing, evals PASS**
+Rounds 1–8 are built and gated: **115 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
 run still lands its repair, an interruption leg where a run
 that dies after its first edit resumes to a verified success
 without re-applying it, a costing leg that prices a live-path
-run plan-vs-execution and folds cost per successful task, and a
+run plan-vs-execution and folds cost per successful task, a
 promotion leg that measures the incumbent's held-out baseline and
 a copy candidate at the gate's full worst-of-3, refuses the
 evaluator's self-promotion, promotes through a second actor,
-rolls back, and refuses a regressed candidate; counters at zero).
+rolls back, and refuses a regressed candidate, and a comparison
+leg where a throwaway shortlist — the offline profile, a copy,
+a priced fake-transport live profile, and a keyless live profile
+recorded not_servable with its reason — runs side by side over
+the held-out set and prints the folded matrix; counters at zero).
 The default model profile is now earned, not configured: the gold
 suite is split tuning/held-out under content hashes, a profile is
 benchmarked through the real service path with the records
@@ -256,10 +279,15 @@ publishes a table version with prices it verified. The live adapter is exercised
 through a fake transport replaying recorded-shape responses — it
 has **not yet been run against the real Baseten endpoint**, which
 needs a `BASETEN_API_KEY`; the first live smoke is a deployment
-step, and this status will say so until it has happened. What is
+step, and this status will say so until it has happened. The
+shortlist now runs side by side as a stored comparison: every
+profile over the same set through the benchmark path, the
+keyless ones recorded not_servable with their reasons, and the
+report folded from the records — evidence with no ranking
+attached, because the promotion gate is the only path that
+changes the default. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: the shortlist comparison (round 8), which
-will consume the promotion gate's records. The Postgres
+`docs/architecture.md`: the injection red team (round 9). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.

@@ -422,11 +422,86 @@ of the webinar's discipline side by side: what the work costs per
 successful task, and what a model must prove before it does the
 work by default.
 
+## The shortlist comparison (round 8)
+
+**A comparison is a record, produced the governed way.** Producing
+one (`run_comparison`, `POST /api/comparisons`) runs **every
+recorded profile** — the profiles directory as it stands: the five
+Baseten family profiles and the offline profile in the shipped
+set — once over the **same** benchmark set, through the round-7
+benchmark path (`run_benchmark`: gold work orders, plan gate,
+sandboxed runs, verification in code), all under one comparison
+actor. The default set is **tuning** — the breadth set; the
+held-out set may be named instead, and the record states which set
+it used and that set's content hash. The request names the set and
+the actor, never the shortlist: a comparison that covered only
+the profiles its requester liked would not be a comparison.
+
+**A profile that cannot serve is recorded, not skipped.** When a
+profile's benchmark cannot even start — a live profile whose key
+is not set in this environment, an override outside its allowlist
+— the refusal (`profile_not_servable`, with its reason: the key
+env it needs, in the refusal's own words) is recorded on the
+comparison as a `not_servable` entry with no benchmark behind it.
+Nothing is silently dropped, and nothing is faked: a not-servable
+profile contributes no successes, no usage, and no cost — it
+contributes the fact that it could not be measured here, and why.
+In an environment with no Baseten key, a comparison over the
+shipped shortlist therefore benchmarks the offline profile and
+records all five live profiles not-servable; with a key and a
+transport, the live profiles benchmark like any other.
+
+**The report is a pure fold.** `GET /api/comparisons` and
+`GET /api/comparisons/{id}` fold the stored records — the
+comparison, the benchmark records it names, the usage rows those
+benchmarks' work orders recorded, the price tables, and the
+promotion records — into the report, per profile:
+
+- the **per-task matrix**: for each task in the set, verified
+  successes over attempts (one benchmark per profile in a
+  comparison, so one attempt; the fold is written for the general
+  shape, and `worst_successes` / `mean_successes` are computed
+  over however many benchmark records the comparison names);
+- **total usage** — calls, tokens, latency — folded from the same
+  usage rows the money came from, plan drafting included;
+- **priced cost and cost per successful task**, folded exactly as
+  the round-6 ledger folds (each row under its stamped table
+  version, all spend over verified successes) — stated **only**
+  where the fold priced the profile's slug. An unpriced fold is
+  labelled with its reasons (`no_price_recorded`, …) and a
+  scripted fold is labelled `scripted`; in both cases cost per
+  successful task is *not stated* (null), never a zero presented
+  as a price;
+- **failure classes**, counted from the benchmark outcomes, and
+  the zero-tolerance violation count;
+- the profile's **promotion standing**, read from the gate's own
+  records at read time: the state of its latest held-out
+  evaluation (`none` / `passed` / `failed` / `stale` — stale when
+  that evaluation's hash is no longer the held-out set's hash)
+  and whether it is the incumbent default right now.
+
+Recomputing the report changes nothing — it writes no record and
+moves no default. A comparison whose set has since moved (a task
+edited after it was recorded) is marked `stale` on the report,
+with both hashes shown; the stored record is never rewritten.
+
+**No ranking theatre.** The report carries no ordering and no
+verdict: profiles appear in the shortlist's recorded order, the
+matrix shows what each one did, and that is all. The comparison
+record states on its face that it is evidence only and that the
+promotion gate is the only path that changes the default — a
+profile with the cleanest row in the matrix still becomes the
+default only by passing a current held-out evaluation, judged by
+a second actor, with no regression against the incumbent's
+recorded baseline. The console renders the latest comparison as
+that matrix beside the cost fold and the gate, with the same
+note attached.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
 staleness · R4 tool depth · R5 failure recovery · R6 budgets
-+ cost ledger · R7 model promotion gate (this round) · R8 shortlist comparison ·
++ cost ledger · R7 model promotion gate · R8 shortlist comparison (this round) ·
 R9 injection red team · R10 verification depth · R11 review
 workbench · R12 task library · R13 challenge pass · R14 batch work
 orders · R15 observability · R16 deployment profiles · R17 MCP
@@ -434,7 +509,7 @@ surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
 prod smoke).
 
-## Honest limits (round 7)
+## Honest limits (round 8)
 
 - The live Baseten adapter is built to Baseten's documented
   OpenAI-compatible shape and is exercised end to end in tests and
@@ -469,3 +544,11 @@ prod smoke).
   worst-of-3 held-out evaluation is six agent runs, each verified
   by shelling out to pytest, and the gate's tests and eval leg pay
   that cost openly rather than mocking the runs they judge.
+- A comparison is as expensive as the benchmarks it runs: one
+  benchmark per servable profile over the named set, each task a
+  real verified run. The shipped shortlist in a keyless
+  environment benchmarks only the offline profile (the five live
+  profiles record not-servable), but a deployment with a key pays
+  a full benchmark per live profile per comparison — that is the
+  honest price of evidence over assertion, and the reason the
+  comparison is a recorded act rather than a dashboard refresh.
