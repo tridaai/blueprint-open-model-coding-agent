@@ -64,6 +64,19 @@ reason recorded, rather than crashing the shell.
   tokens. The suite folds the same rows per profile into cost per
   successful task: all of a profile's priced spend over its
   verified successes.
+- Which profile serves is itself a governed record. The gold suite
+  is split into a tuning set and a held-out set (see
+  :mod:`.benchmarks`), each named by a content hash over its tasks.
+  A profile is benchmarked through this same service path — work
+  orders, plan gate, runs, verification in code — and the records
+  are stored. A promotion evaluation runs the held-out set N times
+  and is scored by its worst run; any out-of-scope edit or
+  unverified success in any run fails it outright. Promotion is a
+  judged act: it needs a passing, current-hash evaluation, no
+  regression against the incumbent default's own recorded
+  baseline, and an actor other than the evaluation's. The default
+  is the latest promotion event's target; rollback is a new event
+  restoring the previous default. Nothing else can move it.
 """
 
 from __future__ import annotations
@@ -71,10 +84,19 @@ from __future__ import annotations
 import shutil
 import time
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
-from .config import Settings
-from .errors import GateError
+from .benchmarks import (
+    BENCHMARK_SETS,
+    DEFAULT_EVALUATION_RUNS,
+    SET_HELD_OUT,
+    normalise_actor,
+    split_problems,
+    task_set_hash,
+)
+from .config import Settings, load_settings, resolve_profile
+from .errors import ConfigError, GateError
 from .gold import GoldSuite
 from .logging_setup import log_event
 from .model_port import Step, make_model, validate_plan_draft
@@ -142,8 +164,15 @@ def _new_id(prefix: str) -> str:
 
 
 class CodingService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, follow_default: bool = True) -> None:
         self.settings = settings
+        # A primary service serves the governed default: the
+        # configured profile until a promotion event moves it.
+        # Services the benchmark runner builds to serve one named
+        # candidate pass follow_default=False — they are pinned to
+        # their settings' profile and never chase the default they
+        # are being measured for.
+        self._follow_default = follow_default
         self.store = SqlStore(settings)
         self.gold = GoldSuite(settings.gold_dir)
         # The price table is governed data, loaded fail-closed at
@@ -162,6 +191,34 @@ class CodingService:
     def _audit(self, entity: str, entity_id: str, event: str, actor: str, **detail):
         self.store.append_audit(entity, entity_id, event, actor, detail)
 
+    # -- the serving profile ------------------------------------------------
+    def default_profile_id(self) -> str:
+        """The governed default: the latest promotion event's
+        target, or the configured profile when no event exists.
+        The configured profile is the seed a deployment starts
+        with; from the first promotion on, the record rules."""
+        events = self.store.list_promotion_events()
+        return events[-1]["to_profile"] if events else self.settings.model_profile
+
+    def serving_profile_id(self) -> str:
+        """The profile this service serves work under: the governed
+        default for a primary service; the settings' own profile
+        for a pinned service (a benchmark candidate being measured
+        serves itself, never the default it is measured against)."""
+        if not self._follow_default:
+            return self.settings.model_profile
+        return self.default_profile_id()
+
+    def serving_profile(self):
+        """The serving profile's effective record. The configured
+        profile resolves through the settings (its overrides were
+        applied at load); any other profile — a promoted default —
+        resolves through the same rules at serve time."""
+        profile_id = self.serving_profile_id()
+        if profile_id == self.settings.model_profile:
+            return self.settings.profile
+        return resolve_profile(self.settings, profile_id)
+
     # -- model usage -----------------------------------------------------
     def _persist_usage(self, model, *, work_order_id: str, run_id: str | None) -> None:
         """Drain the model's accounting into stored usage records,
@@ -174,7 +231,7 @@ class CodingService:
                     **record,
                     "run_id": run_id,
                     "work_order_id": work_order_id,
-                    "profile_id": self.settings.model_profile,
+                    "profile_id": self.serving_profile_id(),
                     "price_table_version": self.price_table.version,
                 }
             )
@@ -201,9 +258,9 @@ class CodingService:
 
     def _make_model(self, *, scripts=None):
         return make_model(
-            self.settings.model_profile,
+            self.serving_profile_id(),
             scripts=scripts,
-            profile=self.settings.profile,
+            profile=self.serving_profile(),
             transport=self.settings.model_transport,
         )
 
@@ -325,6 +382,430 @@ class CodingService:
                 **total_fold.as_dict(successes=total_successes),
             },
         }
+
+    # -- benchmarks and the promotion gate ----------------------------------
+    def benchmark_sets(self) -> dict:
+        """The named benchmark sets and what each measures now:
+        its tasks and its current content hash."""
+        self._require_sound_split()
+        return {
+            name: {
+                "tasks": list(task_ids),
+                "task_set_hash": task_set_hash(self.gold, name),
+            }
+            for name, task_ids in BENCHMARK_SETS.items()
+        }
+
+    def _require_sound_split(self) -> None:
+        problems = split_problems(self.gold)
+        if problems:
+            raise ConfigError(
+                "benchmark split does not partition the gold suite: "
+                + "; ".join(problems)
+            )
+
+    def _benchmark_service(self, profile_id: str) -> "CodingService":
+        """A sibling service over the same store, pinned to one
+        candidate profile: benchmarks run through the REAL service
+        path — work orders, plan gate, sandboxed runs, verification
+        in code — with the candidate serving, and their records
+        land in the same system of record as all other work. The
+        sibling is pinned (follow_default=False): being measured
+        for the default must never mean serving it."""
+        try:
+            settings = load_settings(
+                sqlite_path=self.settings.sqlite_path,
+                database_url=self.settings.database_url,
+                profiles_dir=self.settings.profiles_dir,
+                prices_dir=self.settings.prices_dir,
+                migrations_dir=self.settings.migrations_dir,
+                gold_dir=self.settings.gold_dir,
+                targets_dir=self.settings.targets_dir,
+                runs_dir=self.settings.runs_dir,
+                artifacts_dir=self.settings.artifacts_dir,
+                policy=self.settings.policy,
+                model_profile=profile_id,
+                model_transport=self.settings.model_transport,
+            )
+        except ConfigError as exc:
+            raise GateError("profile_not_servable", str(exc)) from None
+        return CodingService(settings, follow_default=False)
+
+    def run_benchmark(
+        self, profile_id: str, *, set_name: str, actor: str
+    ) -> dict:
+        """Run one benchmark: the named set, once, under the named
+        profile, through the real service path. Every task becomes
+        a gold work order — drafted, approved by the benchmark
+        actor, run — and the verdict is the shell's verification,
+        never the model's word. The record stores per-task outcomes
+        (verified success, or the failure class), the usage, the
+        priced cost, and the set's content hash, so it can only
+        ever be compared against the identical set."""
+        if set_name not in BENCHMARK_SETS:
+            raise GateError(
+                "unknown_benchmark_set",
+                f"no benchmark set named {set_name!r}; the sets are "
+                f"{sorted(BENCHMARK_SETS)}",
+            )
+        self._require_sound_split()
+        bench = self._benchmark_service(profile_id)
+        profile = bench.serving_profile()
+        set_hash = task_set_hash(self.gold, set_name)
+        outcomes: list[dict] = []
+        for task_id in BENCHMARK_SETS[set_name]:
+            task = self.gold.get(task_id)
+            assert task is not None
+            outcomes.append(
+                self._benchmark_task(bench, task, actor=actor)
+            )
+        record = {
+            "benchmark_id": _new_id("bench"),
+            "profile_id": profile_id,
+            "model": profile.model,
+            "set_name": set_name,
+            "task_set_hash": set_hash,
+            "actor": actor,
+            "outcomes": outcomes,
+            "successes": sum(
+                1 for o in outcomes if o["verified_success"]
+            ),
+            "tasks": len(outcomes),
+            "violations": sum(
+                1 for o in outcomes if o["failure_class"] in (
+                    "out_of_scope_edit", "unverified_success",
+                )
+            ),
+            "priced_cost": str(
+                sum(
+                    (Decimal(o["cost"]["priced_cost"]) for o in outcomes),
+                    Decimal(0),
+                )
+            ),
+            "created_at": utcnow(),
+        }
+        self.store.append_benchmark_run(record)
+        log_event(
+            "benchmark_recorded", profile_id=profile_id, set_name=set_name,
+            successes=record["successes"], tasks=record["tasks"],
+        )
+        return record
+
+    def _benchmark_task(self, bench: "CodingService", task, *, actor: str) -> dict:
+        """One task of a benchmark, end to end. A governance
+        refusal anywhere in the path is recorded as the task's
+        outcome — a benchmark reports what happened, it does not
+        stop at the first refusal."""
+        outcome: dict = {
+            "task_id": task.id,
+            "work_order_id": None,
+            "run_id": None,
+            "status": "refused",
+            "verified_success": False,
+            "out_of_scope_files": [],
+            "failure_class": None,
+            "detail": "",
+            "usage": {
+                "calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "latency_ms": 0,
+            },
+            "cost": {
+                "priced_cost": "0",
+                "unpriced_tokens": 0,
+                "scripted_chars": 0,
+            },
+        }
+        try:
+            order = bench.create_gold_work_order(task.id, actor=actor)
+            wid = order["work_order_id"]
+            outcome["work_order_id"] = wid
+            bench.draft_plan(wid, actor=actor)
+            bench.decide_plan(wid, approve=True, actor=actor)
+            run = bench.start_run(wid, actor=actor)
+        except GateError as exc:
+            outcome["failure_class"] = f"refused_{exc.code}"
+            outcome["detail"] = exc.message
+            return outcome
+        outcome["run_id"] = run["run_id"]
+        outcome["status"] = run["status"]
+        totals = run.get("usage_totals") or {}
+        outcome["usage"] = {
+            "calls": totals.get("calls", 0),
+            "prompt_tokens": totals.get("prompt_tokens", 0),
+            "completion_tokens": totals.get("completion_tokens", 0),
+            "latency_ms": totals.get("latency_ms", 0),
+        }
+        cost = run.get("cost") or {}
+        outcome["cost"] = {
+            "priced_cost": cost.get("total", "0"),
+            "unpriced_tokens": cost.get("unpriced_tokens", 0),
+            "scripted_chars": cost.get("scripted_chars", 0),
+        }
+        out_of_scope = [
+            f for f in run.get("changed_files") or []
+            if f not in task.file_scope
+        ]
+        outcome["out_of_scope_files"] = out_of_scope
+        verified = bool((run.get("verification") or {}).get("passed"))
+        if out_of_scope:
+            # Zero tolerance. The tool port and the verification
+            # already make this structurally unreachable — scope is
+            # enforced at the edit, and a patch touching out-of-scope
+            # files fails verification — but the record is checked
+            # anyway: the gate trusts stored records, not arguments
+            # about why they must be fine.
+            outcome["failure_class"] = "out_of_scope_edit"
+            outcome["detail"] = (
+                f"patch touched files outside the approved scope: "
+                f"{out_of_scope}"
+            )
+        elif run["status"] == "succeeded" and not verified:
+            outcome["failure_class"] = "unverified_success"
+            outcome["detail"] = (
+                "run stands succeeded without a passing verification"
+            )
+        elif run["status"] == "succeeded" and verified:
+            outcome["verified_success"] = True
+        elif run["status"] == "interrupted":
+            outcome["failure_class"] = "run_interrupted"
+            outcome["detail"] = run.get("interruption_reason") or ""
+        else:
+            outcome["failure_class"] = "run_failed"
+            outcome["detail"] = (
+                (run.get("verification") or {}).get("reason")
+                or run.get("failure_reason")
+                or ""
+            )
+        return outcome
+
+    def evaluate_profile(
+        self,
+        profile_id: str,
+        *,
+        actor: str,
+        times: int = DEFAULT_EVALUATION_RUNS,
+        set_name: str = SET_HELD_OUT,
+    ) -> dict:
+        """A promotion evaluation: the held-out set, run ``times``
+        times, folded into one stored record. The score is the
+        WORST run's verified successes — one good run is weather;
+        the worst of N is the claim. Any out-of-scope edit or
+        unverified success in any run fails the evaluation
+        outright, whatever the counts say."""
+        if times < 1:
+            raise GateError(
+                "invalid_evaluation_runs",
+                f"an evaluation runs the set at least once, got {times}",
+            )
+        benches = [
+            self.run_benchmark(profile_id, set_name=set_name, actor=actor)
+            for _ in range(times)
+        ]
+        violations: list[dict] = []
+        for bench in benches:
+            for outcome in bench["outcomes"]:
+                if outcome["failure_class"] in (
+                    "out_of_scope_edit",
+                    "unverified_success",
+                ):
+                    violations.append(
+                        {
+                            "benchmark_id": bench["benchmark_id"],
+                            "task_id": outcome["task_id"],
+                            "kind": outcome["failure_class"],
+                        }
+                    )
+        record = {
+            "evaluation_id": _new_id("eval"),
+            "profile_id": profile_id,
+            "model": benches[0]["model"],
+            "set_name": set_name,
+            "task_set_hash": benches[0]["task_set_hash"],
+            "actor": actor,
+            "runs": times,
+            "benchmark_ids": [b["benchmark_id"] for b in benches],
+            "successes_per_run": [b["successes"] for b in benches],
+            "worst_successes": min(b["successes"] for b in benches),
+            "set_size": benches[0]["tasks"],
+            "violations": violations,
+            "passed": not violations,
+            "priced_cost": str(
+                sum(
+                    (Decimal(b["priced_cost"]) for b in benches),
+                    Decimal(0),
+                )
+            ),
+            "created_at": utcnow(),
+        }
+        self.store.append_promotion_evaluation(record)
+        log_event(
+            "promotion_evaluated", profile_id=profile_id,
+            worst_successes=record["worst_successes"],
+            set_size=record["set_size"], passed=record["passed"],
+        )
+        return record
+
+    def _latest_evaluation(self, profile_id: str) -> dict | None:
+        """The profile's latest held-out evaluation — the one a
+        promotion judges by. A newer evaluation supersedes an older
+        one by being later; results cannot be shopped."""
+        evaluations = [
+            e
+            for e in self.store.list_promotion_evaluations(profile_id)
+            if e["set_name"] == SET_HELD_OUT
+        ]
+        return evaluations[-1] if evaluations else None
+
+    def promote(
+        self, profile_id: str, *, actor: str, rationale: str
+    ) -> dict:
+        """Make a profile the default — a judged act, not a config
+        edit. The gate, in order: a held-out evaluation for the
+        candidate exists, is current (the set's hash has not
+        moved), and passed; the actor is not the actor who recorded
+        that evaluation; and the candidate's worst run does not
+        regress against the incumbent default's own recorded
+        baseline. Every refusal names its rule."""
+        current = self.default_profile_id()
+        current_hash = task_set_hash(self.gold, SET_HELD_OUT)
+        evaluation = self._latest_evaluation(profile_id)
+        if evaluation is None:
+            raise GateError(
+                "no_passing_evaluation",
+                f"promotion refused: no held-out evaluation is recorded "
+                f"for profile {profile_id!r}; run evaluate_profile first "
+                f"— a profile becomes the default on evidence, not on "
+                f"nomination",
+            )
+        if evaluation["task_set_hash"] != current_hash:
+            raise GateError(
+                "evaluation_stale",
+                f"promotion refused: the evaluation of {profile_id!r} "
+                f"was recorded against task-set hash "
+                f"{evaluation['task_set_hash'][:12]}…, but the held-out "
+                f"set now hashes to {current_hash[:12]}… — the set "
+                f"moved, so the result no longer describes it; "
+                f"re-running the benchmark is the only way back",
+            )
+        if not evaluation["passed"]:
+            raise GateError(
+                "no_passing_evaluation",
+                f"promotion refused: the latest held-out evaluation of "
+                f"{profile_id!r} did not pass — zero-tolerance "
+                f"violations are on its record "
+                f"({len(evaluation['violations'])}); a candidate with "
+                f"a violation in any run cannot become the default",
+            )
+        if normalise_actor(actor) == normalise_actor(evaluation["actor"]):
+            raise GateError(
+                "self_promotion",
+                f"promotion refused: {actor!r} recorded the evaluation "
+                f"of {profile_id!r} and cannot also promote it; "
+                f"promotion is a second person's judgement on the "
+                f"evidence",
+            )
+        if profile_id != current:
+            baseline = self._latest_evaluation(current)
+            if baseline is None:
+                raise GateError(
+                    "no_passing_evaluation",
+                    f"promotion refused: the incumbent default "
+                    f"{current!r} has no recorded held-out evaluation "
+                    f"to judge regression against; record its baseline "
+                    f"(evaluate_profile on the incumbent) first — the "
+                    f"bar a candidate must clear is a measured one, "
+                    f"never a remembered one",
+                )
+            if baseline["task_set_hash"] != current_hash:
+                raise GateError(
+                    "evaluation_stale",
+                    f"promotion refused: the incumbent default "
+                    f"{current!r}'s baseline evaluation was recorded "
+                    f"against a task-set hash that has since moved; "
+                    f"re-run its benchmark before judging a candidate "
+                    f"against it",
+                )
+            if evaluation["worst_successes"] < baseline["worst_successes"]:
+                raise GateError(
+                    "regression",
+                    f"promotion refused: candidate {profile_id!r}'s "
+                    f"worst held-out run verified "
+                    f"{evaluation['worst_successes']} of "
+                    f"{evaluation['set_size']} tasks, below the "
+                    f"incumbent {current!r}'s recorded baseline of "
+                    f"{baseline['worst_successes']}; an equal score "
+                    f"promotes — no regression is the bar, not "
+                    f"must-beat — but a worse one does not",
+                )
+        event = {
+            "event_id": _new_id("promo"),
+            "kind": "promotion",
+            "from_profile": current,
+            "to_profile": profile_id,
+            "actor": actor,
+            "rationale": rationale,
+            "evaluation_id": evaluation["evaluation_id"],
+            "task_set_hash": current_hash,
+            "created_at": utcnow(),
+        }
+        self.store.append_promotion_event(event)
+        log_event(
+            "profile_promoted", profile_id=profile_id,
+            from_profile=current, actor=actor,
+        )
+        return {**event, "default_profile_id": profile_id}
+
+    def rollback(self, *, actor: str, rationale: str) -> dict:
+        """Restore the previous default — its own recorded act.
+        Rollback needs no evaluation: it returns to a state that
+        was itself promoted on evidence. It is refused only when
+        there is no history to roll back to."""
+        events = self.store.list_promotion_events()
+        if not events:
+            raise GateError(
+                "no_promotion_history",
+                "rollback refused: no promotion has been recorded, so "
+                "there is no previous default to restore; the "
+                "configured profile stands",
+            )
+        last = events[-1]
+        current = last["to_profile"]
+        target = last["from_profile"]
+        event = {
+            "event_id": _new_id("promo"),
+            "kind": "rollback",
+            "from_profile": current,
+            "to_profile": target,
+            "actor": actor,
+            "rationale": rationale,
+            "evaluation_id": None,
+            "task_set_hash": task_set_hash(self.gold, SET_HELD_OUT),
+            "created_at": utcnow(),
+        }
+        self.store.append_promotion_event(event)
+        log_event(
+            "profile_rolled_back", profile_id=target,
+            from_profile=current, actor=actor,
+        )
+        return {**event, "default_profile_id": target}
+
+    def promotion_state(self) -> dict:
+        """The gate's whole position, as recorded: the default and
+        where it came from, the sets and their current hashes,
+        every evaluation, and the full promotion history."""
+        return {
+            "default_profile_id": self.default_profile_id(),
+            "configured_profile_id": self.settings.model_profile,
+            "serving_profile_id": self.serving_profile_id(),
+            "sets": self.benchmark_sets(),
+            "evaluations": self.store.list_promotion_evaluations(),
+            "events": self.store.list_promotion_events(),
+        }
+
+    def list_benchmarks(self, profile_id: str | None = None) -> list[dict]:
+        return self.store.list_benchmark_runs(profile_id)
 
     def audit(self, work_order_id: str) -> list[dict]:
         return self.store.list_audit("work_order", work_order_id)
@@ -482,7 +963,7 @@ class CodingService:
             steps=[PlanStep(**step.as_dict()) for step in draft.steps],
             files=draft.files,
             tests=draft.tests,
-            model_profile=self.settings.model_profile,
+            model_profile=self.serving_profile_id(),
             created_at=utcnow(),
         )
         self.store.put_plan(plan.model_dump())
@@ -720,7 +1201,7 @@ class CodingService:
                 run_id=run_id,
                 work_order_id=work_order_id,
                 plan_version=plan["version"],
-                model_profile=self.settings.model_profile,
+                model_profile=self.serving_profile_id(),
                 workspace=str(workspace),
                 budget=self._budget_snapshot(),
                 created_at=utcnow(),

@@ -36,6 +36,34 @@ def load_profile(profile_id: str, profiles_dir: Path | None = None) -> ModelProf
     return _load_profile_record(profile_id, profiles_dir or (REPO_ROOT / "profiles"))
 
 
+def resolve_profile(settings: "Settings", profile_id: str) -> ModelProfile:
+    """The effective record for a profile under this deployment:
+    the record itself, with the deployment's environment overrides
+    applied and validated against the record, and — for a live
+    profile — the key check :func:`load_settings` performs at
+    startup. The configured profile resolves through
+    ``Settings.profile``; any other profile that comes to serve —
+    a promoted default, a benchmark candidate — resolves through
+    here, so the rules are identical whichever profile serves: an
+    override never widens a profile, and a live profile without
+    its key refuses by name rather than falling back."""
+    profile = _load_profile_record(profile_id, settings.profiles_dir)
+    if not profile.is_live:
+        return profile
+    effective = apply_overrides(
+        profile,
+        model=os.environ.get("BASETEN_MODEL") or None,
+        base_url=os.environ.get("BASETEN_BASE_URL") or None,
+    )
+    if not os.environ.get(effective.api_key_env or ""):
+        raise ConfigError(
+            f"model profile {effective.profile_id!r} is live and needs "
+            f"{effective.api_key_env} set in the environment; refusing "
+            f"to serve it without one (no silent fallback to offline)"
+        )
+    return effective
+
+
 @dataclass(frozen=True)
 class Policy:
     """Governed ceilings for one run, enforced in the shell.
