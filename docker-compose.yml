@@ -1,0 +1,32 @@
+# Local stack: the agent shell plus its production-profile store.
+# The app defaults to SQLite on a bare `uv run` / `make serve`; under
+# compose it runs the Postgres profile.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: codingagent
+      POSTGRES_PASSWORD: codingagent
+      POSTGRES_DB: codingagent
+    ports:
+      - "5432:5432"
+    volumes:
+      - codingagent-db:/var/lib/postgresql/data
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://codingagent:codingagent@db:5432/codingagent
+      # Round 1 runs the labelled offline profile; set MODEL_PROFILE=baseten
+      # and BASETEN_API_KEY once the live adapter lands in round 2.
+      MODEL_PROFILE: offline
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    volumes:
+      - codingagent-data:/app/data
+
+volumes:
+  codingagent-db:
+  codingagent-data:
