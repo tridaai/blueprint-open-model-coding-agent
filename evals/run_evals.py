@@ -35,6 +35,13 @@ recorded-shape responses (no network, no key):
    split plan vs execution; the profile fold prints cost per
    successful task; and an offline run folds as scripted accounting
    — counted, never priced.
+8. MODEL PROMOTION GATE (round 7) — a promotion leg in a throwaway
+   store with throwaway profiles (never the repo's real default):
+   the incumbent's held-out baseline and a copy candidate's
+   evaluation, both at the gate's full worst-of-3; the evaluator's
+   self-promotion refused; promotion by a second actor; rollback;
+   and a weak candidate whose worst run regresses refused. The
+   task-set hash is checked against a drifted copy of the suite.
 
 Zero-tolerance counters: edits that landed outside the approved
 scope, and runs marked SUCCEEDED without a passing verification.
@@ -55,6 +62,10 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import open_model_coding_agent.service as service_module  # noqa: E402
 from open_model_coding_agent.baseten import HttpResponse  # noqa: E402
+from open_model_coding_agent.benchmarks import (  # noqa: E402
+    SET_HELD_OUT,
+    task_set_hash,
+)
 from open_model_coding_agent.config import load_settings  # noqa: E402
 from open_model_coding_agent.errors import GateError  # noqa: E402
 from open_model_coding_agent.gold import GoldSuite  # noqa: E402
@@ -532,6 +543,150 @@ def cost_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def _no_op_scripts(scripts):
+    """The weak candidate's scripts: the order-coupon repair with
+    its first edit turned into a no-op — the edit lands, the
+    feature does not arrive, grading fails. A plausible-looking
+    run that does not do the work."""
+    copied = {
+        task_id: [dict(edit) for edit in edits]
+        for task_id, edits in (scripts or {}).items()
+    }
+    edits = copied.get("order-coupon")
+    if edits:
+        edits[0]["new"] = edits[0]["old"]
+    return copied
+
+
+def promotion_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 7: the promotion gate, exercised in a throwaway store
+    with throwaway profiles — the repo's real default is never
+    touched. The incumbent's baseline and the copy candidate's
+    evaluation run at the gate's full worst-of-3; the controls
+    prove the gate bites: self-promotion refused, promotion by a
+    second actor, rollback, and a weak candidate whose worst run
+    regresses refused by name."""
+    profiles_dir = scratch / "promotion" / "profiles"
+    profiles_dir.mkdir(parents=True)
+    for source in sorted((REPO_ROOT / "profiles").glob("*.json")):
+        shutil.copy(source, profiles_dir / source.name)
+    for profile_id in ("offline-copy", "offline-weak"):
+        (profiles_dir / f"{profile_id}.json").write_text(
+            json.dumps(
+                {
+                    "profile_id": profile_id,
+                    "version": 1,
+                    "label": f"eval-throwaway {profile_id}",
+                    "kind": "offline",
+                }
+            )
+        )
+    settings = load_settings(
+        sqlite_path=str(scratch / "promotion" / "codingagent.db"),
+        targets_dir=scratch / "promotion" / "targets",
+        runs_dir=scratch / "promotion" / "runs",
+        artifacts_dir=scratch / "promotion" / "artifacts",
+        profiles_dir=profiles_dir,
+    )
+    service = CodingService(settings)
+
+    baseline = service.evaluate_profile("offline", actor="Eval Evaluator")
+    check(
+        "promotion: the incumbent's baseline is measured, worst of 3",
+        baseline["passed"] is True
+        and baseline["runs"] == 3
+        and baseline["successes_per_run"] == [2, 2, 2]
+        and baseline["worst_successes"] == 2
+        and baseline["task_set_hash"] == task_set_hash(suite, SET_HELD_OUT),
+        f"offline baseline: worst {baseline['worst_successes']}/"
+        f"{baseline['set_size']} over {baseline['runs']} held-out runs, "
+        f"hash {baseline['task_set_hash'][:12]}…",
+    )
+    candidate = service.evaluate_profile("offline-copy", actor="Eval Evaluator")
+    check(
+        "promotion: an equal candidate passes its evaluation",
+        candidate["passed"] is True and candidate["worst_successes"] == 2,
+        f"offline-copy: worst {candidate['worst_successes']}/"
+        f"{candidate['set_size']} — equal to the baseline, and equal "
+        f"promotes: the bar is no regression, not must-beat",
+    )
+    code = None
+    try:
+        service.promote(
+            "offline-copy", actor="eval evaluator", rationale="my own work"
+        )
+    except GateError as exc:
+        code = exc.code
+    check(
+        "promotion: the evaluator cannot promote their own candidate",
+        code == "self_promotion"
+        and service.default_profile_id() == "offline",
+        f"refusal {code}; the default did not move",
+    )
+    event = service.promote(
+        "offline-copy",
+        actor="Eval Promoter",
+        rationale="equal held-out evidence at worst-of-3",
+    )
+    check(
+        "promotion: a second actor promotes on the evidence",
+        event["default_profile_id"] == "offline-copy"
+        and service.default_profile_id() == "offline-copy",
+        "default is offline-copy, as a stored promotion event",
+    )
+    back = service.rollback(actor="Eval Promoter", rationale="hold the rollout")
+    check(
+        "promotion: rollback restores the previous default",
+        back["default_profile_id"] == "offline"
+        and service.default_profile_id() == "offline",
+        "default is offline again; the history keeps both events",
+    )
+
+    original = service_module.make_model
+
+    def weak_make_model(profile_id, scripts=None, **kwargs):
+        if profile_id == "offline-weak":
+            return OfflineScriptedModel(scripts=_no_op_scripts(scripts))
+        return original(profile_id, scripts=scripts, **kwargs)
+
+    service_module.make_model = weak_make_model
+    try:
+        weak = service.evaluate_profile(
+            "offline-weak", actor="Eval Evaluator", times=2
+        )
+    finally:
+        service_module.make_model = original
+    code = None
+    try:
+        service.promote(
+            "offline-weak", actor="Eval Promoter", rationale="cheaper"
+        )
+    except GateError as exc:
+        code = exc.code
+    check(
+        "promotion: a regressed candidate cannot promote",
+        weak["worst_successes"] == 1
+        and code == "regression"
+        and service.default_profile_id() == "offline",
+        f"offline-weak worst run {weak['worst_successes']}/"
+        f"{weak['set_size']} against a 2/2 baseline; refusal {code}",
+    )
+
+    moved = scratch / "promotion" / "gold-moved"
+    shutil.copytree(REPO_ROOT / "evals" / "gold", moved)
+    overlay = moved / "broken" / "order-coupon" / "workshop" / "orders.py"
+    overlay.write_text(overlay.read_text() + "\n# the set moved\n")
+    check(
+        "promotion: the task-set hash binds results to the set",
+        task_set_hash(GoldSuite(moved), SET_HELD_OUT)
+        != task_set_hash(suite, SET_HELD_OUT)
+        and task_set_hash(GoldSuite(moved), "tuning")
+        == task_set_hash(suite, "tuning"),
+        "editing a held-out task moves the held-out hash and not the "
+        "tuning hash; results recorded under the old hash are stale",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -614,6 +769,7 @@ def main() -> int:
     tool_depth_leg(suite, scratch, check)
     recovery_leg(suite, scratch, check)
     cost_leg(suite, scratch, check)
+    promotion_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
