@@ -60,7 +60,13 @@ in code rather than prompted, and where the rounds go from here.
   tools on the wire; tool calls come back as port steps (a batched
   response queues its steps); tool results fold back as tool
   messages. Plan drafting runs in JSON mode and parses through the
-  same refusal (`malformed_plan`) as any bad draft. HTTP goes
+  same refusal (`malformed_plan`) as any bad draft. Every request
+  carries the serving profile's recorded `max_tokens` ceiling —
+  the shortlist's models reason before they answer, and a reply
+  that hits the ceiling with nothing usable (finish_reason
+  `length`, empty content, no tool calls) fails as
+  `model_output_truncated`, with the spent call's usage recorded
+  first — never as an empty plan the shell misreads. HTTP goes
   through a transport seam — a small urllib transport in production
   (no new dependency), a fake in tests — and failures are named and
   bounded: 401 `model_auth_failed`, 404 `model_unknown_slug`,
@@ -77,7 +83,18 @@ in code rather than prompted, and where the rounds go from here.
   a live profile without its key env refuses there too, and the
   `BASETEN_MODEL` / `BASETEN_BASE_URL` overrides are validated
   against the selected profile's record — an override can pin, it
-  cannot widen.
+  cannot widen. A live record also governs the per-request
+  completion ceiling (`max_tokens`, default 8192) and whether the
+  provider's catalog currently serves its model at all
+  (`servable`): a profile the catalog does not list is recorded
+  `servable: false` with the reason and read date on the record,
+  and every serving path — settings, profile resolution, the model
+  factory, and through them benchmarks and comparisons (which
+  record it `not_servable`, with the reason) — refuses it by that
+  reason. The shipped records were refreshed against Baseten's
+  live Model APIs catalog on 2026-10-19: the allowlists are
+  exactly the verified slugs, and the `baseten-qwen` profile
+  stands recorded not servable — the catalog lists no Qwen model.
 - **Usage records (`model_usage`, migration 0002).** One row per
   model call: the work order, the run (NULL for plan drafting), the
   profile and slug that served, the counts, and the latency. Live
@@ -367,7 +384,12 @@ stamped, at record time, with the version in force (migration
 historical run keeps the prices it was costed under even after the
 table moves on. The shipped v1 records the shortlist's five slugs
 with **null prices**: numbers this repo has not verified are not
-invented, and a null price folds as unpriced.
+invented, and a null price folds as unpriced. Table v2 is the
+verified publication: five slugs (DeepSeek V4 Flash 0731, DeepSeek
+V4 Pro 0813, GLM-5.2, Kimi-K3, gpt-oss-120b) priced exactly as the
+live catalog read of 2026-10-19 stated them, with the read named
+in the record's source. V1 stays on disk untouched; rows recorded
+under it keep folding under it — still unpriced, as they were.
 
 **The ledger.** All money is `Decimal`; no float touches it. A run
 stores its cost fold at every landing: `total`, split into `plan`
@@ -638,21 +660,32 @@ verification and stored on the verdict record:
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
 staleness · R4 tool depth · R5 failure recovery · R6 budgets
 + cost ledger · R7 model promotion gate · R8 shortlist comparison ·
-R9 injection red team · R10 verification depth (this round) · R11 review
+R9 injection red team · R10 verification depth · live wiring
+(this round: profiles and prices verified against the provider's
+live catalog, the reasoning-model request shape, and the live
+smoke tool) · R11 review
 workbench · R12 task library · R13 challenge pass · R14 batch work
 orders · R15 observability · R16 deployment profiles · R17 MCP
 surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
 prod smoke).
 
-## Honest limits (round 10)
+## Honest limits
 
+- The model profiles and the price table are no longer doc-shaped:
+  both were verified against Baseten's Model APIs catalog read
+  live on 2026-10-19, and the records name that read. The catalog
+  will move again; a profile or price is only ever as current as
+  the read its record cites, and refreshing one is a data change
+  through the same governed loaders, not a code change.
 - The live Baseten adapter is built to Baseten's documented
   OpenAI-compatible shape and is exercised end to end in tests and
   evals through a fake transport replaying recorded-shape
-  responses. It has not yet been run against the real endpoint —
-  that needs a `BASETEN_API_KEY` and is a deployment step; nothing
-  here claims otherwise.
+  responses. It has not yet been run end to end against the real
+  endpoint. `tools/live_smoke.py` is the deployment check that
+  runs it — one gold task on a live profile, printing the recorded
+  evidence — and this status stays as it is until that run has
+  happened and been recorded; nothing here claims otherwise.
 - The offline model is a scripted stand-in: it solves gold tasks from
   the suite's scripted edits and does not pretend to solve ad-hoc
   work (it inspects, runs tests, and finishes without edits).
@@ -684,8 +717,11 @@ prod smoke).
   benchmark per servable profile over the named set, each task a
   real verified run. The shipped shortlist in a keyless
   environment benchmarks only the offline profile (the five live
-  profiles record not-servable), but a deployment with a key pays
-  a full benchmark per live profile per comparison — that is the
+  profiles record not-servable), and a deployment with a key
+  benchmarks four of them — the qwen profile records not-servable
+  there too, because the catalog its record was verified against
+  lists no Qwen model — and pays a full benchmark per servable
+  live profile per comparison. That is the
   honest price of evidence over assertion, and the reason the
   comparison is a recorded act rather than a dashboard refresh.
 - The red team's grading isolation (round 9) proves the grading

@@ -56,13 +56,23 @@ cp .env.example .env   # then set BASETEN_API_KEY
   The live adapter (round 2) speaks tool calling over that
   OpenAI-compatible API behind the same model port the offline model
   uses; the agent loop cannot tell which backend served it. Pick
-  the model by profile: `baseten-glm` (`zai-org/GLM-5`),
-  `baseten-kimi` (`moonshotai/Kimi-K2.5`), `baseten-deepseek`
-  (`deepseek-ai/DeepSeek-V3.1`), `baseten-qwen`
-  (`Qwen/Qwen3-Coder-480B-A35B-Instruct`), `baseten-gpt-oss`
-  (`openai/gpt-oss-120b`). Every model call's usage — tokens and
+  the model by profile — the shipped records name the slugs
+  Baseten's Model APIs catalog listed when it was read live on
+  2026-10-19: `baseten-deepseek`
+  (`deepseek-ai/DeepSeek-V4-Flash-0731`, the model this blueprint
+  is built with), `baseten-glm` (`zai-org/GLM-5.2`), `baseten-kimi`
+  (`moonshotai/Kimi-K3`), `baseten-gpt-oss` (`openai/gpt-oss-120b`).
+  The fifth family profile, `baseten-qwen`, names a model that
+  catalog does not currently serve; its record says so
+  (`servable: false`, with the reason), and every surface that
+  lists it records it **not servable** rather than pretending the
+  slug is live. Every model call's usage — tokens and
   latency, from the provider's usage object — is recorded against
-  its run; that accounting is what the cost ledger prices.
+  its run; that accounting is what the cost ledger prices. Each
+  profile also records the per-request completion ceiling
+  (`max_tokens`, 8192) the adapter sends — these are reasoning
+  models, and the budget they reason within is a per-model fact,
+  not a constant in code.
 - **Profiles are governed data** — versioned JSON records in
   `profiles/`, loaded fail-closed: an unknown profile name, an
   unknown field in a record, or a slug outside a profile's own
@@ -79,6 +89,25 @@ cp .env.example .env   # then set BASETEN_API_KEY
   OpenAI-compatible endpoint) join the profile loader as the rounds
   land — the profile is the seam, and it is fail-closed: an unknown
   profile name is a startup error, never a fallback.
+
+## The live smoke check (operators)
+
+`tools/live_smoke.py` is the deployment live check: it builds the
+service the way the app does (settings from the environment), runs
+**one** gold task end to end on a live profile — plan draft, plan
+approval, sandboxed run, verification in code — and prints the
+recorded evidence: the plan decision, the run's status and
+verification verdict, every usage row, and the priced cost.
+
+```bash
+BASETEN_API_KEY=... uv run python tools/live_smoke.py
+BASETEN_API_KEY=... uv run python tools/live_smoke.py --profile baseten-glm --task low-stock-report
+```
+
+The default profile is `baseten-deepseek` and the default task is
+`reserve-overcommit`. Without the key in the environment it prints
+the shell's named refusal and exits non-zero — no traceback, and
+no silent fallback to the offline model.
 
 ## Quickstart
 
@@ -168,10 +197,13 @@ make serve       # API + console on http://localhost:8000
    (`prices/table-v<N>.json`: versioned records, loaded
    fail-closed, Decimal throughout) and stored on the run, split
    plan vs execution — each usage row priced under the table
-   version stamped on it when it was recorded. The shipped table
-   records the shortlist's slugs with **null prices**: numbers this
-   repo has not verified are not invented, and an unpriced slug's
-   tokens are counted with the reason named, never zeroed. The
+   version stamped on it when it was recorded. The shipped v1
+   table records its slugs with **null prices**: numbers this
+   repo has not verified are not invented. Table v2 (2026-10-19)
+   is the verified publication — five slugs priced exactly as the
+   live catalog read stated them — and v1 stays on disk untouched,
+   so rows recorded under it still fold unpriced, counted with
+   the reason named, never zeroed. The
    console folds all of it per profile into **cost per successful
    task** — all of a profile's priced spend, failures included,
    over its verified successes. The offline model's accounting is
@@ -265,7 +297,8 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–10 are built and gated: **147 tests passing, evals PASS**
+Rounds 1–10 plus the live-wiring round are built and gated:
+**162 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -305,17 +338,23 @@ the review gate can never accept. Runs also spend against enforced
 budgets (calls, tokens, active wall seconds — snapshotted at
 start; a budget-stopped run cannot resume, only restart into a
 fresh budget) and every run carries its priced cost from the
-governed price table. The shipped table's prices are null —
-unverified numbers are recorded as unverified, so live runs fold
-as unpriced (counted, reasoned, never zero) until a deployment
-publishes a table version with prices it verified. The live adapter is exercised in tests and evals
+governed price table. The profiles and the price table have since
+been verified against Baseten's live Model APIs catalog (read
+2026-10-19): the profile allowlists name exactly the slugs that
+read verified, and price table v2 prices five of them at the
+figures that read stated — v1 remains on disk, and rows recorded
+under it still fold as unpriced (counted, reasoned, never zero).
+One profile the catalog does not serve stands recorded as such:
+`baseten-qwen`, not servable with its reason on the record. The live adapter is exercised in tests and evals
 through a fake transport replaying recorded-shape responses — it
-has **not yet been run against the real Baseten endpoint**, which
-needs a `BASETEN_API_KEY`; the first live smoke is a deployment
-step, and this status will say so until it has happened. The
+has **not yet been run against the real Baseten endpoint**;
+`tools/live_smoke.py` is the deployment check that runs it, and
+this status will say so until that run has happened and been
+recorded. The
 shortlist now runs side by side as a stored comparison: every
 profile over the same set through the benchmark path, the
 keyless ones recorded not_servable with their reasons, and the
+qwen profile recorded not_servable with or without a key, and the
 report folded from the records — evidence with no ranking
 attached, because the promotion gate is the only path that
 changes the default. The injection red team (round 9) then
