@@ -16,10 +16,14 @@ A slug with no recorded price — absent from the table, or recorded
 with null prices because nobody has verified them yet — folds as
 UNPRICED: its tokens are counted separately and never enter a money
 total, and never silently count as zero cost either. The shipped
-table (v1) records the shortlist's slugs with null prices on
-purpose: the numbers a deployment prices with must be numbers it
-verified against the provider's current pricing, and this repo does
-not invent them.
+v1 table records its slugs with null prices on purpose: the numbers
+a deployment prices with must be numbers it verified against the
+provider's current pricing, and this repo does not invent them.
+Table v2 (2026-10-19) is what a verified publication looks like:
+five slugs priced exactly as Baseten's Model APIs catalog stated
+them when it was read live, with the read named in the record's
+source. V1 stays on disk untouched — rows recorded under it keep
+folding under it.
 
 All money arithmetic is :class:`decimal.Decimal`. Prices are
 recorded as decimal strings in the JSON (``"0.30"`` per million
