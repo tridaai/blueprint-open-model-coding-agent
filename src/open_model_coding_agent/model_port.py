@@ -33,10 +33,52 @@ from .errors import ConfigError, GateError
 
 
 @dataclass
+class PlanStepDraft:
+    """One step of a plan: what it intends to change, the files it
+    touches, and the tests it expects to run."""
+
+    intent: str
+    files: list[str] = field(default_factory=list)
+    tests: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {
+            "intent": self.intent,
+            "files": list(self.files),
+            "tests": list(self.tests),
+        }
+
+
+@dataclass
 class PlanDraft:
+    """A plan: an approach, and the work as an ordered list of steps.
+
+    ``files`` and ``tests`` are derived — the unions over the steps,
+    in step order — because the steps are the plan; the flat lists
+    are what the shell enforces scope against and what a reader
+    scans first.
+    """
+
     approach: str
-    files: list[str]
-    tests: list[str]
+    steps: list[PlanStepDraft] = field(default_factory=list)
+
+    @property
+    def files(self) -> list[str]:
+        out: list[str] = []
+        for step in self.steps:
+            for path in step.files:
+                if path not in out:
+                    out.append(path)
+        return out
+
+    @property
+    def tests(self) -> list[str]:
+        out: list[str] = []
+        for step in self.steps:
+            for path in step.tests:
+                if path not in out:
+                    out.append(path)
+        return out
 
 
 @dataclass
@@ -45,23 +87,58 @@ class Step:
     args: dict = field(default_factory=dict)
 
 
-def validate_plan_draft(draft: PlanDraft, *, file_scope: list[str]) -> PlanDraft:
+def validate_plan_draft(
+    draft: PlanDraft,
+    *,
+    file_scope: list[str],
+    repo_files: list[str] | None = None,
+    grading_tests: list[str] | None = None,
+) -> PlanDraft:
     """The one validation every plan draft passes, whichever model
     produced it — the offline script, or a live model's JSON reply.
-    A draft that fails is refused as ``malformed_plan`` by name."""
+    A draft that fails is refused as ``malformed_plan`` by name.
+
+    The structure: an approach, and at least one step; every step
+    carries an intent and names at least one file, and every file it
+    names sits inside the work order's approved scope. The tests a
+    step names must resolve — to a file that exists in the target
+    repo, or to the task's grading set. Resolution is checked when
+    the caller supplies that context (the service always does); a
+    context-free call checks structure and scope only.
+    """
     if not isinstance(draft.approach, str) or not draft.approach.strip():
         raise GateError("malformed_plan", "the plan's approach is missing or empty")
-    if not draft.files:
-        raise GateError("malformed_plan", "the plan names no files")
+    if not draft.steps:
+        raise GateError("malformed_plan", "the plan has no steps")
     scope = set(file_scope)
-    outside = [f for f in draft.files if f not in scope]
-    if outside:
-        raise GateError(
-            "malformed_plan",
-            f"the plan names files outside the approved file scope: {outside}",
-        )
-    if not all(isinstance(t, str) for t in draft.tests):
-        raise GateError("malformed_plan", "the plan's tests must be a list of paths")
+    resolvable: set[str] | None = None
+    if repo_files is not None or grading_tests is not None:
+        exact = set(repo_files or []) | set(grading_tests or [])
+        resolvable = exact | {Path(p).name for p in exact}
+    for index, step in enumerate(draft.steps):
+        label = f"plan step {index + 1}"
+        if not isinstance(step.intent, str) or not step.intent.strip():
+            raise GateError("malformed_plan", f"{label} has no intent")
+        if not step.files:
+            raise GateError("malformed_plan", f"{label} names no files")
+        outside = [f for f in step.files if f not in scope]
+        if outside:
+            raise GateError(
+                "malformed_plan",
+                f"{label} names files outside the approved file scope: {outside}",
+            )
+        if not all(isinstance(t, str) for t in step.tests):
+            raise GateError(
+                "malformed_plan", f"{label}'s tests must be a list of paths"
+            )
+        if resolvable is not None:
+            unresolved = [t for t in step.tests if t not in resolvable]
+            if unresolved:
+                raise GateError(
+                    "malformed_plan",
+                    f"{label} names tests that resolve to nothing in the "
+                    f"target repo or the grading set: {unresolved}",
+                )
     return draft
 
 
@@ -130,14 +207,32 @@ class OfflineScriptedModel(ModelPort):
             or "Inspect the files in scope, make the smallest change that "
             "satisfies the task text, and run the named tests."
         )
-        tests = list(work_order.get("grading_tests") or [])
-        if gold_id:
-            tests = tests or ["(gold grading tests, staged at verification)"]
-        draft = PlanDraft(
-            approach=approach,
-            files=list(work_order["file_scope"]),
-            tests=tests,
-        )
+        # A gold task carries its plan steps in the suite; the scripted
+        # model drafts the plan the suite says a competent plan has.
+        steps = [
+            PlanStepDraft(
+                intent=str(spec.get("intent") or ""),
+                files=list(spec.get("files") or []),
+                tests=list(spec.get("tests") or []),
+            )
+            for spec in (work_order.get("_plan_steps") or [])
+        ]
+        if not steps:
+            tests = list(work_order.get("grading_tests") or [])
+            if gold_id and work_order.get("_grading_relpath"):
+                tests = tests or [work_order["_grading_relpath"]]
+            steps = [
+                PlanStepDraft(
+                    intent=(
+                        "Make the smallest change that satisfies the task "
+                        "text in the files in scope, then check it against "
+                        "the named tests."
+                    ),
+                    files=list(work_order["file_scope"]),
+                    tests=tests,
+                )
+            ]
+        draft = PlanDraft(approach=approach, steps=steps)
         self._account(
             {"task_text": work_order.get("task_text"), "repo_files": repo_files},
             {"approach": draft.approach, "files": draft.files, "tests": draft.tests},

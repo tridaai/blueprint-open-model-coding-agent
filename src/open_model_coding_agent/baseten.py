@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .errors import GateError
-from .model_port import ModelPort, PlanDraft, Step
+from .model_port import ModelPort, PlanDraft, PlanStepDraft, Step
 from .profiles import ModelProfile
 
 _RETRYABLE = {429, 500, 502, 503, 529}
@@ -161,10 +161,12 @@ class UrllibTransport:
 
 
 def parse_plan_content(content: str) -> PlanDraft:
-    """Parse a model's plan reply into a draft. Anything malformed
-    is a named refusal; the service's shared validator then checks
-    the draft's semantics (scope, shape) exactly as it does for the
-    offline model's drafts."""
+    """Parse a model's plan reply into a draft. The wire shape is the
+    plan's own shape: an approach and an ordered list of steps, each
+    with an intent, its files, and the tests it expects to run.
+    Anything malformed is a named refusal; the service's shared
+    validator then checks the draft's semantics (scope, resolution)
+    exactly as it does for the offline model's drafts."""
     try:
         raw = json.loads(content)
     except (json.JSONDecodeError, TypeError):
@@ -174,15 +176,39 @@ def parse_plan_content(content: str) -> PlanDraft:
     if not isinstance(raw, dict):
         raise GateError("malformed_plan", "the model's plan reply was not a JSON object")
     approach = raw.get("approach")
-    files = raw.get("files")
-    tests = raw.get("tests", [])
     if not isinstance(approach, str) or not approach.strip():
         raise GateError("malformed_plan", "the plan's approach is missing or empty")
-    if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
-        raise GateError("malformed_plan", "the plan's files must be a list of paths")
-    if not isinstance(tests, list) or not all(isinstance(t, str) for t in tests):
-        raise GateError("malformed_plan", "the plan's tests must be a list of paths")
-    return PlanDraft(approach=approach, files=list(files), tests=list(tests))
+    raw_steps = raw.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise GateError(
+            "malformed_plan", "the model's plan reply carried no steps"
+        )
+    steps: list[PlanStepDraft] = []
+    for index, item in enumerate(raw_steps):
+        label = f"plan step {index + 1}"
+        if not isinstance(item, dict):
+            raise GateError(
+                "malformed_plan", f"the model's {label} was not a JSON object"
+            )
+        intent = item.get("intent")
+        files = item.get("files")
+        tests = item.get("tests", [])
+        if not isinstance(intent, str) or not intent.strip():
+            raise GateError("malformed_plan", f"the model's {label} has no intent")
+        if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+            raise GateError(
+                "malformed_plan",
+                f"the model's {label} files must be a list of paths",
+            )
+        if not isinstance(tests, list) or not all(isinstance(t, str) for t in tests):
+            raise GateError(
+                "malformed_plan",
+                f"the model's {label} tests must be a list of paths",
+            )
+        steps.append(
+            PlanStepDraft(intent=intent, files=list(files), tests=list(tests))
+        )
+    return PlanDraft(approach=approach, steps=steps)
 
 
 # -- the adapter -------------------------------------------------------------
@@ -333,10 +359,12 @@ class BasetenModel(ModelPort):
                 "content": (
                     "You are the planning step of a governed coding agent. "
                     "Reply with one JSON object and nothing else: "
-                    '{"approach": "...", "files": [...], "tests": [...]}. '
-                    "files must come from the work order's approved file "
-                    "scope; tests are the test files that should prove "
-                    "the change."
+                    '{"approach": "...", "steps": [{"intent": "...", '
+                    '"files": [...], "tests": [...]}]}. '
+                    "steps are the work in order: each step says what it "
+                    "intends to change, names files only from the work "
+                    "order's approved file scope, and names the test "
+                    "files that should prove it."
                 ),
             },
             {
@@ -363,6 +391,15 @@ class BasetenModel(ModelPort):
         self._queue = []
         self._awaiting = []
         self._seen = 0
+        step_lines = [
+            f"{index + 1}. {step.get('intent', '')} "
+            f"(files: {', '.join(step.get('files') or [])}; "
+            f"tests: {', '.join(step.get('tests') or [])})"
+            for index, step in enumerate(plan.get("steps") or [])
+        ]
+        steps_block = (
+            "\nPlan steps:\n" + "\n".join(step_lines) if step_lines else ""
+        )
         self._messages = [
             {
                 "role": "system",
@@ -386,6 +423,7 @@ class BasetenModel(ModelPort):
                     f"Approved plan: {plan.get('approach', '')}\n"
                     f"Approved file scope: {plan.get('files', [])}\n"
                     f"Tests to run: {plan.get('tests', [])}"
+                    f"{steps_block}"
                 ),
             },
         ]

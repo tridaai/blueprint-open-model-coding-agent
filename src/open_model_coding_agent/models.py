@@ -56,17 +56,39 @@ class WorkOrder(BaseModel):
     updated_at: str = ""
 
 
+class PlanStep(BaseModel):
+    """One step of a plan: its intent, the files it touches, and the
+    tests it expects to run."""
+
+    intent: str
+    files: list[str] = Field(default_factory=list)
+    tests: list[str] = Field(default_factory=list)
+
+
 class Plan(BaseModel):
     work_order_id: str
     version: int = 1
     approach: str
-    files: list[str]
-    tests: list[str]
+    # The plan itself: the work as an ordered list of steps. files
+    # and tests are the derived unions over the steps, stored so the
+    # shell's scope checks and every reader see the same facts.
+    steps: list[PlanStep] = Field(default_factory=list)
+    files: list[str] = Field(default_factory=list)
+    tests: list[str] = Field(default_factory=list)
     model_profile: str = "offline"
     status: str = "draft"  # draft | approved | rejected
     decided_by: str | None = None
     decided_at: str | None = None
     decision_note: str | None = None
+    # Recorded at approval: the fingerprint of the approved scope in
+    # the target repo, and the per-file digests behind it. Execution
+    # recomputes both and refuses a drifted world as stale_plan.
+    scope_fingerprint: str | None = None
+    scope_digests: dict | None = None
+    # For an amendment (version > 1 written by amend_plan): the diff
+    # against the version it supersedes, and who amended it.
+    diff_from_previous: dict | None = None
+    amended_by: str | None = None
     created_at: str = ""
 
 
@@ -90,6 +112,28 @@ class PlanDecisionIn(BaseModel):
     approve: bool
     actor: str
     note: str | None = None
+
+
+class PlanStepIn(BaseModel):
+    intent: str
+    files: list[str]
+    tests: list[str] = Field(default_factory=list)
+
+
+class AmendPlanIn(BaseModel):
+    """An amendment arrives as a full replacement step list: the new
+    version is a whole plan, diffed against the one it supersedes."""
+
+    approach: str
+    steps: list[PlanStepIn]
+    actor: str
+
+
+class RunStartIn(BaseModel):
+    # Naming a plan version pins the run to it; anything but the
+    # latest version is refused as plan_superseded.
+    plan_version: int | None = None
+    actor: str = "console"
 
 
 class ReviewDecisionIn(BaseModel):

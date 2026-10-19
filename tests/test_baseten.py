@@ -94,8 +94,13 @@ def test_plan_draft_over_the_wire():
                 content=json.dumps(
                     {
                         "approach": "Guard the reservation against availability.",
-                        "files": ["workshop/inventory.py"],
-                        "tests": ["workshop/tests/test_inventory.py"],
+                        "steps": [
+                            {
+                                "intent": "Add the availability check to reserve.",
+                                "files": ["workshop/inventory.py"],
+                                "tests": ["workshop/tests/test_inventory.py"],
+                            }
+                        ],
                     }
                 )
             )
@@ -104,6 +109,8 @@ def test_plan_draft_over_the_wire():
     adapter = make_adapter(transport)
     draft = adapter.draft_plan(work_order=ORDER, repo_files=["workshop/inventory.py"])
     assert draft.files == ["workshop/inventory.py"]
+    assert draft.steps[0].intent == "Add the availability check to reserve."
+    assert draft.tests == ["workshop/tests/test_inventory.py"]
     request = transport.requests[0]
     assert request["url"] == "https://inference.baseten.co/v1/chat/completions"
     assert request["headers"]["Authorization"] == "Bearer test-key"
@@ -117,7 +124,13 @@ def test_plan_draft_over_the_wire():
 
 
 def test_malformed_plan_replies_refuse_by_name():
-    for content in ("not json at all", json.dumps({"files": "oops"}), ""):
+    for content in (
+        "not json at all",
+        json.dumps({"files": "oops"}),
+        json.dumps({"approach": "a", "steps": []}),
+        json.dumps({"approach": "a", "steps": [{"files": ["x.py"]}]}),
+        "",
+    ):
         adapter = make_adapter(FakeTransport([chat_response(content=content)]))
         with pytest.raises(GateError) as exc:
             adapter.draft_plan(work_order=ORDER, repo_files=[])
@@ -226,7 +239,16 @@ def test_rate_limit_retries_then_succeeds():
             HttpResponse(429, "{}"),
             chat_response(
                 content=json.dumps(
-                    {"approach": "a", "files": ["workshop/inventory.py"], "tests": []}
+                    {
+                        "approach": "a",
+                        "steps": [
+                            {
+                                "intent": "do the work",
+                                "files": ["workshop/inventory.py"],
+                                "tests": [],
+                            }
+                        ],
+                    }
                 )
             ),
         ]
@@ -356,11 +378,7 @@ def _gold_script(service, task_id):
     script = [
         chat_response(
             content=json.dumps(
-                {
-                    "approach": task.plan_approach,
-                    "files": list(task.file_scope),
-                    "tests": [],
-                }
+                {"approach": task.plan_approach, "steps": task.plan_steps}
             )
         )
     ]
@@ -415,8 +433,13 @@ def test_a_model_failure_mid_run_ends_the_run_failed(tmp_path, monkeypatch):
         content=json.dumps(
             {
                 "approach": "Guard the reservation.",
-                "files": ["workshop/inventory.py"],
-                "tests": [],
+                "steps": [
+                    {
+                        "intent": "Add the availability check.",
+                        "files": ["workshop/inventory.py"],
+                        "tests": [],
+                    }
+                ],
             }
         )
     )
@@ -446,8 +469,13 @@ def test_a_live_plan_outside_the_scope_is_refused_by_the_shared_validator(
                 content=json.dumps(
                     {
                         "approach": "Rewrite everything.",
-                        "files": ["workshop/orders.py"],
-                        "tests": [],
+                        "steps": [
+                            {
+                                "intent": "Rewrite the orders module.",
+                                "files": ["workshop/orders.py"],
+                                "tests": [],
+                            }
+                        ],
                     }
                 )
             )

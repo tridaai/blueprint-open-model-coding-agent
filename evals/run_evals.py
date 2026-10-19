@@ -105,11 +105,7 @@ def live_leg(suite: GoldSuite, scratch: Path, check) -> None:
     script = [
         _chat(
             content=json.dumps(
-                {
-                    "approach": task.plan_approach,
-                    "files": list(task.file_scope),
-                    "tests": [],
-                }
+                {"approach": task.plan_approach, "steps": task.plan_steps}
             )
         ),
         _chat(tool_calls=calls),

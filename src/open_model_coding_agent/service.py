@@ -35,7 +35,7 @@ from .errors import GateError
 from .gold import GoldSuite
 from .logging_setup import log_event
 from .model_port import Step, make_model, validate_plan_draft
-from .models import Plan, Run, WorkOrder, WorkOrderIn
+from .models import Plan, PlanStep, Run, WorkOrder, WorkOrderIn
 from .patch import PatchError, apply_patch, build_patch
 from .store import SqlStore, utcnow
 from .tools import SandboxTools, dispatch
@@ -180,6 +180,38 @@ class CodingService:
         }
 
     # -- plan gate ---------------------------------------------------------
+    def _repo_files(self, order: dict) -> list[str]:
+        """The target repo's files, repo-relative — the context plan
+        validation resolves test names against."""
+        target = Path(order["target_path"])
+        if not target.is_dir():
+            return []
+        return sorted(
+            p.relative_to(target).as_posix()
+            for p in target.rglob("*")
+            if p.is_file() and "__pycache__" not in p.parts
+        )
+
+    def _grading_names(self, order: dict) -> list[str]:
+        """The task's grading set, by name: the order's named grading
+        tests, plus a gold task's grading file at its staged path."""
+        names = list(order.get("grading_tests") or [])
+        gold = self.gold.get(order["gold_task_id"]) if order.get("gold_task_id") else None
+        if gold is not None:
+            names.append(gold.grading_relpath())
+        return names
+
+    def _validate_draft(self, draft, order: dict) -> None:
+        """One validator for every plan draft, scripted or live —
+        called with the full context: the approved scope, the repo's
+        files, and the grading set test names must resolve against."""
+        validate_plan_draft(
+            draft,
+            file_scope=list(order["file_scope"]),
+            repo_files=self._repo_files(order),
+            grading_tests=self._grading_names(order),
+        )
+
     def draft_plan(self, work_order_id: str, actor: str = "console") -> dict:
         order = self._require_order(work_order_id)
         if order["status"] not in ("draft", "plan_rejected"):
@@ -188,31 +220,27 @@ class CodingService:
                 f"a plan can only be drafted from draft/plan_rejected, "
                 f"not {order['status']}",
             )
-        target = Path(order["target_path"])
-        repo_files = (
-            sorted(
-                p.relative_to(target).as_posix()
-                for p in target.rglob("*")
-                if p.is_file() and "__pycache__" not in p.parts
-            )
-            if target.is_dir()
-            else []
-        )
+        repo_files = self._repo_files(order)
         model = self._make_model()
         plan_input = dict(order)
         gold = self.gold.get(order["gold_task_id"]) if order.get("gold_task_id") else None
         if gold is not None:
             plan_input["_plan_approach"] = gold.plan_approach
+            plan_input["_plan_steps"] = [dict(step) for step in gold.plan_steps]
+            plan_input["_grading_relpath"] = gold.grading_relpath()
         try:
             draft = model.draft_plan(work_order=plan_input, repo_files=repo_files)
         finally:
             self._persist_usage(model, work_order_id=work_order_id, run_id=None)
         # One validator for every model's draft, scripted or live.
-        validate_plan_draft(draft, file_scope=list(order["file_scope"]))
+        self._validate_draft(draft, order)
+        previous = self.store.get_plan(work_order_id)
+        version = previous["version"] + 1 if previous else 1
         plan = Plan(
             work_order_id=work_order_id,
-            version=1,
+            version=version,
             approach=draft.approach,
+            steps=[PlanStep(**step.as_dict()) for step in draft.steps],
             files=draft.files,
             tests=draft.tests,
             model_profile=self.settings.model_profile,
@@ -222,7 +250,7 @@ class CodingService:
         self._set_status(order, "plan_ready")
         self._audit(
             "work_order", work_order_id, "plan_drafted", actor,
-            version=1, files=plan.files, model_profile=plan.model_profile,
+            version=version, files=plan.files, model_profile=plan.model_profile,
         )
         return plan.model_dump()
 
