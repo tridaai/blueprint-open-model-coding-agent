@@ -52,18 +52,29 @@ cp .env.example .env   # then set BASETEN_API_KEY
 ```
 
 - **Baseten (headline provider)** — `BASETEN_API_KEY`, endpoint
-  `https://inference.baseten.co/v1`, model slugs in `org/name` form:
-  `zai-org/GLM-5` (the default named here), `moonshotai/Kimi-K2.5`,
-  `deepseek-ai/DeepSeek-V3.1`, `openai/gpt-oss-120b`, and the Qwen and
-  MiniMax families. The live adapter — tool calling over Baseten's
-  OpenAI-compatible API — lands in **round 2**; until then the
-  `baseten` profile exists (endpoint, key env, default slug) and a
-  run under it refuses by name rather than silently substituting
-  another model.
-- **Offline (round 1's default)** — `MODEL_PROFILE=offline`: a
-  labelled scripted model drives the same shell over the gold suite.
-  That is what the tests, the evals, and the demo run; no key is
-  needed and no model is called.
+  `https://inference.baseten.co/v1`, model slugs in `org/name` form.
+  The live adapter (round 2) speaks tool calling over that
+  OpenAI-compatible API behind the same model port the offline model
+  uses; the agent loop cannot tell which backend served it. Pick
+  the model by profile: `baseten-glm` (`zai-org/GLM-5`),
+  `baseten-kimi` (`moonshotai/Kimi-K2.5`), `baseten-deepseek`
+  (`deepseek-ai/DeepSeek-V3.1`), `baseten-qwen`
+  (`Qwen/Qwen3-Coder-480B-A35B-Instruct`), `baseten-gpt-oss`
+  (`openai/gpt-oss-120b`). Every model call's usage — tokens and
+  latency, from the provider's usage object — is recorded against
+  its run; that accounting is what the cost ledger (round 6) prices.
+- **Profiles are governed data** — versioned JSON records in
+  `profiles/`, loaded fail-closed: an unknown profile name, an
+  unknown field in a record, or a slug outside a profile's own
+  allowlist refuses by name. Selecting a live profile without
+  `BASETEN_API_KEY` set refuses at startup — never a silent fall
+  back to the offline stand-in. `BASETEN_MODEL` may pin a slug only
+  inside the selected profile's allowlist.
+- **Offline (the default)** — `MODEL_PROFILE=offline`: a labelled
+  scripted model drives the same shell over the gold suite. That is
+  what the tests and the demo run; no key is needed and no model is
+  called. Its usage rows are its own accounting, labelled
+  `scripted`, never presented as API usage.
 - Further endpoint profiles (NVIDIA NIM, a generic self-hosted
   OpenAI-compatible endpoint) join the profile loader as the rounds
   land — the profile is the seam, and it is fail-closed: an unknown
@@ -130,7 +141,9 @@ verification.
 ```
 src/open_model_coding_agent/  the governance shell (service, gates,
                               sandbox tools, patch + verification,
-                              model port, store, API, console)
+                              model port, Baseten adapter, store,
+                              API, console)
+profiles/                     the model profiles, as versioned records
 workshop/                     the sample codebase the agent works on
 evals/gold/                   the gold task suite (broken/fixed/grading)
 evals/run_evals.py            the eval gate
@@ -141,13 +154,18 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Round 1 (core) is built and gated: **27 tests passing, evals PASS**
-(5/5 gold tasks verified end to end, counters at zero). What is
+Rounds 1–2 are built and gated: **43 tests passing, evals PASS**
+(5/5 gold tasks verified end to end on the offline model, plus one
+gold task end to end through the Baseten adapter's code path;
+counters at zero). The live adapter is exercised in tests and evals
+through a fake transport replaying recorded-shape responses — it
+has **not yet been run against the real Baseten endpoint**, which
+needs a `BASETEN_API_KEY`; the first live smoke is a deployment
+step, and this status will say so until it has happened. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: the live Baseten adapter (round 2 — a live
-run needs a `BASETEN_API_KEY`), plan depth and staleness (round 3),
-budgets and the priced cost ledger (round 6), the model promotion
-gate (round 7), and the shortlist comparison (round 8). The Postgres
+`docs/architecture.md`: plan depth and staleness (round 3), budgets
+and the priced cost ledger (round 6), the model promotion gate
+(round 7), and the shortlist comparison (round 8). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.

@@ -38,12 +38,47 @@ in code rather than prompted, and where the rounds go from here.
   proposes; the service disposes. All state transitions go through
   it, so the API and the console can never bypass a gate.
 - **`model_port.py` — the model seam.** A model is asked for a plan
-  draft, then for one step at a time. Round 1 ships the labelled
-  offline scripted model (the default for tests, evals, and the demo)
-  and the Baseten profile's adapter slot: the profile resolves
-  (endpoint, key env, default slug) and a run under it refuses by
-  name until the live adapter lands in round 2. Nothing in the shell
-  knows which model is serving.
+  draft, then for one step at a time. The labelled offline scripted
+  model (the default for tests and the demo) and the live Baseten
+  adapter implement the same port; nothing in the shell knows which
+  model is serving. Every draft, from either, passes the port's one
+  validator (`validate_plan_draft`: approach present, files named
+  and inside the work order's approved scope) — a live model's plan
+  is refused by exactly the code that checks the scripted one's.
+  The port also carries usage accounting: implementations note each
+  call's usage and the service drains and stores it (below).
+- **`baseten.py` — the live adapter.** OpenAI Chat Completions over
+  the profile's endpoint, the key sent as the OpenAI SDK sends it.
+  It translates both ways: the shell's tool schemas become function
+  tools on the wire; tool calls come back as port steps (a batched
+  response queues its steps); tool results fold back as tool
+  messages. Plan drafting runs in JSON mode and parses through the
+  same refusal (`malformed_plan`) as any bad draft. HTTP goes
+  through a transport seam — a small urllib transport in production
+  (no new dependency), a fake in tests — and failures are named and
+  bounded: 401 `model_auth_failed`, 404 `model_unknown_slug`,
+  429/529/5xx retried a bounded number of times with backoff, then
+  `model_rate_limited` / `model_overloaded` / `model_server_error`.
+  Inside a run, such a failure ends the run FAILED with the reason
+  recorded; the shell never hangs or silently retries.
+- **`profiles.py` + `profiles/` — the model profiles, as data.**
+  One versioned JSON record per servable configuration, loaded
+  fail-closed: unknown profile name, unknown field, a slug outside
+  the profile's own allowlist (its recorded models or prefixes, in
+  org/name shape), or an offline record carrying live fields each
+  refuse by name. Settings resolve the named profile at startup;
+  a live profile without its key env refuses there too, and the
+  `BASETEN_MODEL` / `BASETEN_BASE_URL` overrides are validated
+  against the selected profile's record — an override can pin, it
+  cannot widen.
+- **Usage records (`model_usage`, migration 0002).** One row per
+  model call: the work order, the run (NULL for plan drafting), the
+  profile and slug that served, the counts, and the latency. Live
+  rows carry the provider's usage object (`source: api`, unit
+  tokens); the offline model's rows carry its own accounting
+  (`source: scripted`, unit chars) so the two are never confused.
+  Run reads fold their rows in, with totals — the raw material the
+  priced cost ledger (round 6) spends.
 - **`tools.py` — the tool port.** The only hands the agent has,
   rooted at one run workspace:
   - `list_files`, `read_file`, `search` — reads, confined to the
@@ -127,8 +162,14 @@ surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
 prod smoke).
 
-## Honest limits (round 1)
+## Honest limits (round 2)
 
+- The live Baseten adapter is built to Baseten's documented
+  OpenAI-compatible shape and is exercised end to end in tests and
+  evals through a fake transport replaying recorded-shape
+  responses. It has not yet been run against the real endpoint —
+  that needs a `BASETEN_API_KEY` and is a deployment step; nothing
+  here claims otherwise.
 - The offline model is a scripted stand-in: it solves gold tasks from
   the suite's scripted edits and does not pretend to solve ad-hoc
   work (it inspects, runs tests, and finishes without edits).
