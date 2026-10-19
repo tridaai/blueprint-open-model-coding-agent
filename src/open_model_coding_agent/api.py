@@ -83,6 +83,15 @@ def create_app(settings=None) -> FastAPI:
     def costs():
         return service.cost_report()
 
+    # -- the review workbench (round 11) -----------------------------------
+    @app.get("/api/review-queue")
+    def review_queue():
+        return service.review_queue()
+
+    @app.get("/api/reviewers")
+    def reviewers():
+        return service.reviewer_history()
+
     # -- benchmarks and the promotion gate ----------------------------------
     @app.get("/api/benchmarks")
     def benchmarks():
@@ -216,10 +225,24 @@ def create_app(settings=None) -> FastAPI:
             work_order_id, run_id, actor=body.actor, reason=body.reason
         )
 
+    @app.get("/api/work-orders/{work_order_id}/review-packet")
+    def review_packet(work_order_id: str):
+        packet = service.review_packet(work_order_id)
+        if packet is None:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"no work order {work_order_id!r}", "code": "unknown_work_order"},
+            )
+        return packet
+
     @app.post("/api/work-orders/{work_order_id}/review")
     def decide_review(work_order_id: str, body: ReviewDecisionIn):
         return service.decide_review(
-            work_order_id, accept=body.accept, actor=body.actor, reason=body.reason
+            work_order_id,
+            accept=body.accept,
+            actor=body.actor,
+            reason=body.reason,
+            decision=body.decision,
         )
 
     return app

@@ -440,6 +440,13 @@ class BasetenModel(ModelPort):
                     f"Files in the repository: {repo_files}\n"
                     f"Grading tests named on the order: "
                     f"{work_order.get('grading_tests', [])}"
+                    + (
+                        "\n\nA reviewer sent a previous attempt back "
+                        "with this note — plan against it:\n"
+                        f"{work_order['_review_note']}"
+                        if work_order.get("_review_note")
+                        else ""
+                    )
                 ),
             },
         ]

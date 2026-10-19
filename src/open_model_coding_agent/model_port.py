@@ -243,7 +243,14 @@ class OfflineScriptedModel(ModelPort):
             ]
         draft = PlanDraft(approach=approach, steps=steps)
         self._account(
-            {"task_text": work_order.get("task_text"), "repo_files": repo_files},
+            {
+                "task_text": work_order.get("task_text"),
+                "repo_files": repo_files,
+                # Round 11: a reviewer's request-changes note, when
+                # the service supplies one, is part of what this
+                # draft was shown — the accounting says so.
+                "review_note": work_order.get("_review_note"),
+            },
             {"approach": draft.approach, "files": draft.files, "tests": draft.tests},
         )
         return draft

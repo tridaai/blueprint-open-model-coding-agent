@@ -57,6 +57,10 @@
     <tbody id="orders"></tbody>
   </table>
 
+  <h2>Review queue — what needs a person</h2>
+  <div id="queue"><div class="muted">loading…</div></div>
+  <div id="reviewers"></div>
+
   <h2>Cost per successful task — by model profile</h2>
   <div id="costs"><div class="muted">loading…</div></div>
 
@@ -251,6 +255,70 @@ async function loadComparisons() {
   $("comparisons").innerHTML = html;
 }
 
+function ageText(seconds) {
+  if (seconds === null || seconds === undefined) return "—";
+  if (seconds < 90) return seconds + "s";
+  if (seconds < 5400) return Math.round(seconds / 60) + "m";
+  if (seconds < 172800) return (seconds / 3600).toFixed(1) + "h";
+  return (seconds / 86400).toFixed(1) + "d";
+}
+
+async function loadQueue() {
+  const q = await api("/api/review-queue");
+  if (!q.entries.length) {
+    $("queue").innerHTML = `<div class="card"><div class="muted">Nothing is waiting
+      on a person. The queue is folded from the stored records on every read —
+      plans awaiting a decision, verified runs awaiting review, failed runs, and
+      interrupted runs appear here the moment their records land.</div></div>`;
+  } else {
+    $("queue").innerHTML = `
+    <table>
+      <thead><tr><th>Work order</th><th>Waiting as</th><th>Next act</th><th>Age</th>
+        <th>Detail</th><th></th></tr></thead>
+      <tbody>${q.entries.map((e) => {
+        let detail = "";
+        if (e.category === "plan_awaiting_approval") {
+          detail = `plan v${e.plan_version} awaits approval`;
+        } else if (e.category === "awaiting_review") {
+          const f = e.risk_flags || {};
+          detail = `run on plan v${e.plan_version} · changed: ${(e.changed_files || []).map(esc).join(", ")}` +
+            (f.test_surface_touched ? ` · <span class="bad">test surface touched</span>` : ``) +
+            ((f.unplanned_files || []).length ? ` · <span class="bad">unplanned files: ${f.unplanned_files.map(esc).join(", ")}</span>` : ``) +
+            (f.hidden_verdict ? ` · hidden re-grade: ${esc(f.hidden_verdict)}` : ``);
+        } else {
+          detail = `<span class="bad">${esc(e.failure_class || "")}</span> — ${esc(e.failure_detail || "")}` +
+            (e.last_checkpoint ? ` · last checkpoint: ${esc(e.last_checkpoint)}` : ``);
+        }
+        return `<tr>
+          <td>${esc(e.work_order_id)}<div class="muted">${esc(e.title)}</div></td>
+          <td>${esc(e.category.replaceAll("_", " "))}<div class="muted">status: ${esc(e.status)}</div></td>
+          <td><strong>${esc(e.next_act.replaceAll("_", " "))}</strong>` +
+            ((e.available_acts || []).length > 1
+              ? `<div class="muted">also: ${e.available_acts.slice(1).map((a) => esc(a.replaceAll("_", " "))).join(", ")}</div>` : ``) +
+          `</td>
+          <td>${ageText(e.age_seconds)}<div class="muted">since ${esc(e.since || "")}</div></td>
+          <td>${detail}</td>
+          <td><button class="secondary" onclick="showDetail('${esc(e.work_order_id)}')">Open</button></td>
+        </tr>`;
+      }).join("")}
+      </tbody></table>
+    <div class="muted">One entry per order, longest-waiting first. Every decision is a
+      single recorded act on a single order — there is no bulk decision.</div>`;
+  }
+  const h = await api("/api/reviewers");
+  $("reviewers").innerHTML = (h.reviewers || []).length ? `
+    <h2>Reviewer history</h2>
+    <table>
+      <thead><tr><th>Reviewer</th><th>Decisions</th><th>Accepted</th><th>Rejected</th>
+        <th>Changes requested</th><th>Median time to decision</th></tr></thead>
+      <tbody>${h.reviewers.map((r) => `
+        <tr><td>${esc(r.actor)}</td><td>${r.decisions}</td><td>${r.accepted}</td>
+          <td>${r.rejected}</td><td>${r.changes_requested}</td>
+          <td>${r.median_time_to_decision_seconds === null ? "—" : ageText(Math.round(r.median_time_to_decision_seconds))}</td></tr>`).join("")}
+      </tbody></table>
+    <div class="muted">${esc(h.derivation)}.</div>` : "";
+}
+
 async function createFromGold(id) {
   try {
     const order = await api(`/api/work-orders/from-gold/${id}`, "POST");
@@ -279,6 +347,7 @@ async function act(path, body, id) {
   try {
     await api(path, "POST", body);
     await loadOrders();
+    await loadQueue();
     await loadCosts();
     await showDetail(id);
   } catch (e) { showError(e); }
@@ -287,6 +356,7 @@ async function act(path, body, id) {
 async function showDetail(id) {
   clearError();
   const d = await api(`/api/work-orders/${id}`);
+  const packet = await api(`/api/work-orders/${id}/review-packet`).catch(() => null);
   const o = d.work_order, plan = d.plan, runs = d.runs || [];
   const run = runs[runs.length - 1];
   let html = `<h2>Work order ${esc(o.work_order_id)} — ${esc(o.title)}</h2>
@@ -297,6 +367,15 @@ async function showDetail(id) {
   if (!plan && o.status === "draft") {
     html += `<div style="margin-top:10px">
       <button onclick="act('/api/work-orders/${id}/plan', null, '${id}')">Draft plan</button></div>`;
+  }
+  if (o.status === "changes_requested") {
+    html += `<div class="card" style="margin-top:10px; border-color:#B45309">
+      <strong>Changes requested</strong> — the reviewer's note is stored on the order
+      and rides into the next plan draft's context:
+      <div style="margin-top:6px">“${esc(o.review_note || "")}”</div>
+      <div style="margin-top:10px">
+        <button onclick="act('/api/work-orders/${id}/plan', null, '${id}')">Draft a new plan</button>
+      </div></div>`;
   }
   const plans = (d.plans && d.plans.length) ? d.plans : (plan ? [plan] : []);
   plans.slice().reverse().forEach((p, i) => {
@@ -354,13 +433,55 @@ async function showDetail(id) {
     if (o.status === "succeeded") {
       html += `<div style="margin-top:10px">
         <button onclick="decideReview('${id}', true)">Accept patch</button>
+        <button class="secondary" onclick="requestChanges('${id}')">Request changes</button>
         <button class="danger" onclick="decideReview('${id}', false)">Reject patch</button></div>`;
+    }
+    if (o.status === "rejected") {
+      html += `<div style="margin-top:10px">
+        <button class="secondary" onclick="requestChanges('${id}')">Request changes instead</button></div>
+        <div class="muted">A rejected order can still be sent back: requesting changes
+          reverses the rejection into a send-back, with the note stored on the order.</div>`;
     }
     if (o.status === "accepted") {
       html += `<div class="ok" style="margin-top:8px">Accepted — the .patch file was exported to the run artifacts.</div>`;
     }
     if (o.status === "rejected") {
       html += `<div class="bad" style="margin-top:8px">Rejected at review — the reason is on the audit trail.</div>`;
+    }
+  }
+  if (packet) {
+    const flags = packet.risk_flags || {};
+    html += `<h3>Review packet</h3>
+      <div class="muted">Assembled on read from the stored records — the same packet
+        the API serves at <code>/api/work-orders/${esc(id)}/review-packet</code>.</div>`;
+    if (flags.test_surface_touched) {
+      html += `<div class="bad" style="margin-top:6px">Risk: test surface touched (${(flags.test_surface_files || []).map(esc).join(", ")}) — this patch changes the tests it is graded by.</div>`;
+    }
+    if ((flags.unplanned_files || []).length) {
+      html += `<div class="bad" style="margin-top:6px">Risk: unplanned files (${flags.unplanned_files.map(esc).join(", ")}) — no step of the approved plan named them.</div>`;
+    }
+    if (flags.hidden_verdict_absent) {
+      html += `<div class="mid" style="margin-top:6px">Hidden re-grade: absent — this is an ad-hoc order and carries no hidden grading set; the visible verdict is the whole evidence.</div>`;
+    } else if (flags.hidden_verdict) {
+      html += `<div class="muted" style="margin-top:6px">Verdicts — visible: ${esc(flags.visible_verdict || "—")} · hidden re-grade: ${esc(flags.hidden_verdict)}</div>`;
+    }
+    const decs = packet.review_decisions || [];
+    if (decs.length) {
+      html += `<div style="margin-top:8px"><strong>Prior decisions</strong></div>` +
+        decs.map((x) => `<div class="muted">${esc(x.at)} — ${esc(x.kind.replaceAll("_", " "))} by ${esc(x.actor)}` +
+          (x.note ? ` — note: “${esc(x.note)}”` : "") +
+          (x.reason ? ` — reason: ${esc(x.reason)}` : "") + `</div>`).join("");
+    }
+    const ch = packet.changes_since_previous;
+    if (ch) {
+      html += `<div style="margin-top:8px"><strong>What changed since the previous packet</strong>
+        (run ${esc(ch.previous_run_id)} → this run)</div>
+        <div class="muted">plan version: v${ch.plan_version.before} → v${ch.plan_version.now} ·
+          patch files added: ${ch.patch_files.added.map(esc).join(", ") || "none"} ·
+          removed: ${ch.patch_files.removed.map(esc).join(", ") || "none"} ·
+          verdict: ${ch.verdicts.passed.before ? "passed" : "failed"} → ${ch.verdicts.passed.now ? "passed" : "failed"} ·
+          visible: ${esc(ch.verdicts.visible.before || "—")} → ${esc(ch.verdicts.visible.now || "—")} ·
+          hidden: ${esc(ch.verdicts.hidden.before || "—")} → ${esc(ch.verdicts.hidden.now || "—")}</div>`;
     }
   }
   html += `<h3>Audit trail</h3><pre>` +
@@ -433,7 +554,14 @@ async function decideReview(id, accept) {
     { accept, actor, reason: accept ? null : "rejected in console" }, id);
 }
 
-loadReadiness(); loadGold(); loadOrders(); loadCosts(); loadPromotion(); loadComparisons();
+async function requestChanges(id) {
+  const note = prompt("What must change? The note is stored on the order and shown to the next plan draft.");
+  if (note === null) return;
+  await act(`/api/work-orders/${id}/review`,
+    { decision: "request_changes", actor, reason: note }, id);
+}
+
+loadReadiness(); loadGold(); loadOrders(); loadQueue(); loadCosts(); loadPromotion(); loadComparisons();
 </script>
 </body>
 </html>
