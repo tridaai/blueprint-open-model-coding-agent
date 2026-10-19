@@ -13,6 +13,18 @@ has evaluated). Editing the data never widens what a profile may
 serve beyond its own record: the slug a run uses must be the
 profile's recorded default, an env override the loader validates
 against the profile's own allowlist, or nothing.
+
+Two more facts live on a live record. ``max_tokens`` is the
+per-request completion ceiling the adapter sends — governed here,
+as data, because a reasoning model spends completion tokens on
+reasoning before any visible content, and the ceiling that suits
+one model starves another. And ``servable`` records whether the
+provider's catalog currently serves the profile's model at all:
+a profile whose model the provider does not list is recorded
+``servable: false`` with the reason (and the date it was read) on
+the record, and every serving path refuses it by that reason —
+never a mysterious 404 mid-run, never a pretense that the slug
+is live.
 """
 
 from __future__ import annotations
@@ -26,6 +38,11 @@ from .errors import ConfigError
 
 SLUG_SHAPE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+# The completion ceiling a live record carries when it does not
+# name one. Generous on purpose: a reasoning model can spend most
+# of a small budget on reasoning_content and return nothing.
+DEFAULT_MAX_TOKENS = 8192
+
 _COMMON_FIELDS = {"profile_id", "version", "label", "kind"}
 _LIVE_FIELDS = {
     "base_url",
@@ -33,6 +50,9 @@ _LIVE_FIELDS = {
     "model",
     "allowed_models",
     "allowed_model_prefixes",
+    "max_tokens",
+    "servable",
+    "not_servable_reason",
 }
 _KINDS = ("offline", "baseten")
 
@@ -50,10 +70,23 @@ class ModelProfile:
     model: str | None = None
     allowed_models: tuple[str, ...] = ()
     allowed_model_prefixes: tuple[str, ...] = ()
+    max_tokens: int = DEFAULT_MAX_TOKENS
+    servable: bool = True
+    not_servable_reason: str | None = None
 
     @property
     def is_live(self) -> bool:
         return self.kind != "offline"
+
+    def servability_refusal(self) -> ConfigError:
+        """The named refusal every serving path raises for a
+        profile the provider does not currently serve. The record's
+        own reason is the message — a benchmark or comparison that
+        records this refusal records the reason with it."""
+        return ConfigError(
+            f"model profile {self.profile_id!r} is recorded not "
+            f"servable: {self.not_servable_reason}"
+        )
 
     def slug_allowed(self, slug: str) -> bool:
         """A slug is servable by this profile only in the shape the
@@ -114,6 +147,36 @@ def _parse_record(profile_id: str, raw: object, source: Path) -> ModelProfile:
     allowed_prefixes = raw.get("allowed_model_prefixes") or []
     if not all(isinstance(s, str) for s in allowed_models + allowed_prefixes):
         raise _refuse(profile_id, "allowed_models and allowed_model_prefixes must be strings")
+    max_tokens = raw.get("max_tokens", DEFAULT_MAX_TOKENS)
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1:
+        raise _refuse(
+            profile_id,
+            f"max_tokens must be a positive integer (the per-request "
+            f"completion ceiling), got {max_tokens!r}",
+        )
+    servable = raw.get("servable", True)
+    if not isinstance(servable, bool):
+        raise _refuse(profile_id, f"servable must be a boolean, got {servable!r}")
+    not_servable_reason = raw.get("not_servable_reason")
+    if not_servable_reason is not None and (
+        not isinstance(not_servable_reason, str) or not not_servable_reason.strip()
+    ):
+        raise _refuse(
+            profile_id, "not_servable_reason must be a non-empty string when recorded"
+        )
+    if not servable and not not_servable_reason:
+        raise _refuse(
+            profile_id,
+            "a profile recorded servable: false must carry its "
+            "not_servable_reason — a refusal nobody can read is not "
+            "governance, it is a dead end",
+        )
+    if servable and not_servable_reason:
+        raise _refuse(
+            profile_id,
+            "a servable profile carries no not_servable_reason; the "
+            "record contradicts itself",
+        )
     profile = ModelProfile(
         profile_id=profile_id,
         version=version,
@@ -124,6 +187,9 @@ def _parse_record(profile_id: str, raw: object, source: Path) -> ModelProfile:
         model=raw.get("model"),
         allowed_models=tuple(allowed_models),
         allowed_model_prefixes=tuple(allowed_prefixes),
+        max_tokens=max_tokens,
+        servable=servable,
+        not_servable_reason=not_servable_reason,
     )
     model = raw.get("model")
     if not isinstance(model, str) or not profile.slug_allowed(model):

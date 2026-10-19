@@ -300,6 +300,12 @@ def make_model(
     resolved = profile or load_profile(profile_id, profiles_dir)
     if resolved.kind == "offline":
         return OfflineScriptedModel(scripts=scripts)
+    if not resolved.servable:
+        # Backstop: settings resolution refuses a not-servable
+        # profile before a model is ever built, but a direct caller
+        # of the port gets the same named refusal, never an adapter
+        # that will 404 against a catalog that does not list it.
+        raise resolved.servability_refusal()
     api_key = os.environ.get(resolved.api_key_env or "")
     if not api_key:
         raise ConfigError(

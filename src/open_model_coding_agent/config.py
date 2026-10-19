@@ -28,7 +28,10 @@ from .profiles import load_profile as _load_profile_record
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 BASETEN_BASE_URL = "https://inference.baseten.co/v1"
-BASETEN_DEFAULT_MODEL = "zai-org/GLM-5"
+# The model this blueprint is built and smoke-tested with: the
+# baseten-deepseek profile's default, verified against the live
+# Model APIs catalog on 2026-10-19.
+BASETEN_DEFAULT_MODEL = "deepseek-ai/DeepSeek-V4-Flash-0731"
 
 
 def load_profile(profile_id: str, profiles_dir: Path | None = None) -> ModelProfile:
@@ -50,6 +53,8 @@ def resolve_profile(settings: "Settings", profile_id: str) -> ModelProfile:
     profile = _load_profile_record(profile_id, settings.profiles_dir)
     if not profile.is_live:
         return profile
+    if not profile.servable:
+        raise profile.servability_refusal()
     effective = apply_overrides(
         profile,
         model=os.environ.get("BASETEN_MODEL") or None,
@@ -155,6 +160,12 @@ def load_settings(**overrides) -> Settings:
     # Fail closed at load: an unknown profile never reaches a run.
     profile = settings.profile
     if profile.is_live:
+        # A profile the provider does not currently serve refuses
+        # here, with the reason its record carries — before the key
+        # check, because servability is the standing fact about the
+        # catalog, not about this deployment's secrets.
+        if not profile.servable:
+            raise profile.servability_refusal()
         effective = apply_overrides(
             profile,
             model=os.environ.get("BASETEN_MODEL") or None,

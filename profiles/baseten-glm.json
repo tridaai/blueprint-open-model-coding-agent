@@ -1,1 +1,1 @@
-{"allowed_model_prefixes":["zai-org/"],"allowed_models":["zai-org/GLM-5"],"api_key_env":"BASETEN_API_KEY","base_url":"https://inference.baseten.co/v1","kind":"baseten","label":"Baseten Model API — GLM (zai-org/GLM-5)","model":"zai-org/GLM-5","profile_id":"baseten-glm","version":1}
+{"allowed_models":["zai-org/GLM-5.2","zai-org/GLM-5.3"],"api_key_env":"BASETEN_API_KEY","base_url":"https://inference.baseten.co/v1","kind":"baseten","label":"Baseten Model API — GLM (zai-org/GLM-5.2)","max_tokens":8192,"model":"zai-org/GLM-5.2","profile_id":"baseten-glm","version":2}
