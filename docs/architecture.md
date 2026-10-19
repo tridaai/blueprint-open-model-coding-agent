@@ -732,6 +732,98 @@ decided (the run's `finished_at`, its `created_at` as fallback);
 a decision whose run cannot be read counts in the tallies but
 not the timing, and the read states the derivation on its face.
 
+## The task library (round 12)
+
+**A template is a governed record, not a file.** A template
+lives in the store (`task_templates`, migration 0007 in both
+dialects), versioned the way plans are: creating under an
+existing name writes the next version, and no act ever mutates a
+version in place. The record carries the pattern in three parts —
+a **task text** with named parameters (`{module}`,
+`{behaviour}`), a **scope pattern** naming the file shape an
+instantiated order will carry, and a **step skeleton** — plus a
+description of when to use it, its author, and its publication
+state. Creation validates the shape in code
+(`templates.py`, pure functions the service's acts lean on): the
+declared parameter set must equal the set the patterns actually
+use, in both directions; a scope entry must be a clean
+repo-relative path pattern; a skeleton step must name an intent
+and files, and its files must be among the scope pattern's
+entries — a skeleton may not teach a plan to reach outside the
+scope its own template declares.
+
+**Publishing is a second person's act.** A version is born a
+draft: readable, comparable, and unusable. `publish_template`
+flips it to published, recording the publisher and the moment,
+and refuses the version's own author — on normalised names, the
+same separation of duties as the promotion gate. (The three seed
+templates the library ships — `guard-clause-fix`,
+`boundary-fix`, `missing-feature`, one per shape the gold suite
+exercises — are seeded through these same two acts at startup,
+by two standing seed actors; a deployment that already has a
+template of a seed's name keeps its own, untouched.) Version
+resolution is the library's standing rule: an explicit
+name+version always serves, an omitted version resolves to the
+latest published one, and anything unpublished refuses
+`template_not_published` — there is no draft instantiation.
+
+**Instantiation is ordinary intake, with the values checked on
+the way in.** `instantiate_template` resolves the version,
+validates the parameter values against the declared set exactly
+(missing and unknown both refuse by name), substitutes, and
+creates a work order through the same `create_work_order` every
+other order uses. The validation follows where a value lands:
+a parameter used in the scope pattern or a step's files/tests is
+a **path parameter**, and its value must be a single
+path-segment token — no slash, no `..`, no glob — so a value can
+widen nothing; a prose-only parameter (the task text, an intent)
+must still be brace-free, so it cannot masquerade as a
+placeholder. The substituted scope is then re-checked entry by
+entry (`template_scope_invalid`) — defence in depth, since the
+pattern and the values were supplied by different people. A
+caller restating a file scope that differs from the substituted
+pattern refuses `template_scope_widening_refused`. What the
+template can never do is smuggle a plan: instantiation creates
+an order standing at `draft` with no plan on record, and the
+gate refuses an unapproved run exactly as for any order.
+
+**The skeleton is context, labelled.** The order's record
+carries its provenance: template name and version, the parameter
+values, and a **snapshot** of the substituted skeleton — later
+template versions cannot rewrite what an existing order was
+instantiated from. At drafting, the service places the skeleton
+in the draft's context under its own keys, next to the reviewer's
+note: the live adapter prints it in the planning prompt, labelled
+as the template's suggestion and advisory only; the scripted
+model adopts it as its draft when no gold steps compete, and
+records it in its accounting of what it was shown. Either way
+the draft passes the one shared validator and the per-order plan
+gate, and the stored plan carries `template_context` — the
+template's name and version, so a reader of the plan can see the
+suggestion was in the room. The review packet carries the same
+provenance for the reviewer.
+
+**Health is a fold, like everything else here.**
+`template_health` derives a version's standing on read from the
+orders instantiated from it: orders created; runs by status;
+failures by the workbench's own failure classes; review
+decisions counted from the audit records, with the acceptance
+rate among decided reviews; and the **median priced cost per
+success** over the verified successes whose usage the price
+table actually priced — unpriced successes are counted in
+`priced_successes`' denominator by their absence, never folded
+in as zero. Nothing is stored, so the fold can be re-derived
+and argued with, like the queue and the reviewer history.
+
+**Publishing is a human act here, on purpose.** The model
+profiles earn the default through benchmark evaluations (round
+7); templates do not. A template's evidence is its health fold,
+and the judgement to publish a shape for other people's work
+orders stays a person's recorded act. A future round may gate
+template publication on evidence; this round's design keeps the
+two governances distinct rather than borrowing the promotion
+gate's authority for a decision it was not built to judge.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
@@ -840,3 +932,19 @@ prod smoke).
   act that did not touch the order record would age from the
   wrong moment, and every transition in the shell writes the
   order record — the fold leans on that discipline.
+- The task library (round 12) governs the shape of an order, not
+  its content. Parameter validation makes widening and traversal
+  impossible through the values, and the substituted scope is the
+  scope the gates then enforce — but a template's task text is
+  prose a person wrote, and a published template with a careless
+  (or hostile) task text produces careless work orders that pass
+  every mechanical check; the controls are the ones the record
+  shows: authorship on the version, a second person's publish
+  act, provenance on every order, and a health fold that makes a
+  bad shape visible in its outcomes. The skeleton's influence on
+  a live model's plan is advisory in fact as well as in name —
+  the plan is the model's, validated and approved per order —
+  and health attributes outcomes to the template version the
+  order names, though the model, the target, and the reviewer
+  all share the causation; the fold reports the association, it
+  does not apportion it.

@@ -265,6 +265,34 @@ make serve       # API + console on http://localhost:8000
    has moved reads as stale, and the record states on its face
    that the promotion gate is the only path that changes the
    default.
+11. **The task library (round 12).** The shapes of recurring work
+   — a missing guard, a boundary off by one, a feature that is a
+   stub — are stored as **governed templates**: a task-text
+   pattern with named parameters, a scope pattern, and a step
+   skeleton, versioned like plans (an edit is a new version,
+   never a mutation). A version is usable only once **published**,
+   and publishing is an act by someone other than its author.
+   **Instantiation is ordinary intake**: the parameters are
+   substituted and validated in code — a value that lands in a
+   path is a single path-segment token, so traversal, absolute
+   paths, and glob escapes refuse by name, and a caller restating
+   a wider scope than the pattern produces is refused as
+   widening. The created order carries the template's provenance
+   and a snapshot of the substituted skeleton, and is then an
+   ordinary order: the skeleton reaches the plan draft as
+   **labelled context only** — a template can suggest steps,
+   never smuggle a plan; the plan is still drafted, and still
+   approved, per order. The review packet names the provenance,
+   and each version's **health** — orders created, runs by
+   outcome and failure class, acceptance rate, median priced
+   cost per success — is folded on read from those orders, never
+   a stored counter. Three seed templates ship in the library,
+   created and published through the same acts (by two separate
+   seed actors). Publishing a template is a human governed act,
+   deliberately unlike the model profiles: templates are not
+   promoted through benchmark evaluations — the evidence a
+   template earns is its health fold, and the judgement stays a
+   person's.
 
 ## The gold suite (v1)
 
@@ -317,8 +345,8 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–11 plus the live-wiring round are built and gated:
-**174 tests passing, evals PASS**
+Rounds 1–12 plus the live-wiring round are built and gated:
+**188 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -347,7 +375,13 @@ driven through the reviewer's whole journey on the queue and
 packet reads — rejection, a request-changes send-back against
 the stored note, a new plan and run, a re-review packet naming
 what changed, and acceptance, with the leg's decisions folded
-into reviewer history).
+into reviewer history, and a library leg where a seed template
+is instantiated onto its matching gold task — provenance on the
+order, no plan smuggled, the skeleton labelled as template
+context in the draft, the run verified, the packet naming the
+provenance, and health folding the accepted journey, with an
+unpublished template and a traversal parameter each refusing
+by name).
 The default model profile is now earned, not configured: the gold
 suite is split tuning/held-out under content hashes, a profile is
 benchmarked through the real service path with the records
@@ -418,9 +452,17 @@ distinct, usage and cost, run history, prior decisions, and,
 on a re-review, what changed since the previous packet), a
 third decision — request changes — whose note is stored on the
 order and shown to the next plan draft, and reviewer history
-folded from the decision records. What is
+folded from the decision records. The task library (round 12)
+then made the shapes of recurring work governed records —
+templates versioned like plans, published by a second person,
+instantiated through ordinary intake with the parameter values
+validated in code (a path value is a single segment token, so
+traversal and scope-widening refuse by name), the skeleton
+reaching the plan draft as labelled context only, provenance
+on the order and in the review packet, and each version's
+health folded on read from the orders it produced. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: the task library (round 12). The Postgres
+`docs/architecture.md`: the challenge pass (round 13). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.
