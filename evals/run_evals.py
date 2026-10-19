@@ -20,6 +20,11 @@ recorded-shape responses (no network, no key):
    and an amendment leg (the new version carries its diff, the old
    approval does not carry, the amended plan runs on its own
    approval).
+5. TOOL DEPTH (round 4) — a recovery leg: a model whose first edit
+   reaches for too broad an anchor is refused anchor_ambiguous as
+   data, narrows the anchor, and completes the repair; the refusal
+   and the successful edit's anchor digests are on the audit trail
+   as stored records.
 
 Zero-tolerance counters: edits that landed outside the approved
 scope, and runs marked SUCCEEDED without a passing verification.
@@ -37,11 +42,17 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+import open_model_coding_agent.service as service_module  # noqa: E402
 from open_model_coding_agent.baseten import HttpResponse  # noqa: E402
 from open_model_coding_agent.config import load_settings  # noqa: E402
 from open_model_coding_agent.errors import GateError  # noqa: E402
 from open_model_coding_agent.gold import GoldSuite  # noqa: E402
-from open_model_coding_agent.model_port import PlanDraft, PlanStepDraft  # noqa: E402
+from open_model_coding_agent.model_port import (  # noqa: E402
+    OfflineScriptedModel,
+    PlanDraft,
+    PlanStepDraft,
+    Step,
+)
 from open_model_coding_agent.service import CodingService  # noqa: E402
 from open_model_coding_agent.tools import SandboxTools  # noqa: E402
 
@@ -270,6 +281,74 @@ def amendment_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+class _AmbiguousFirstModel(OfflineScriptedModel):
+    """The scripted model, but its first edit reaches for an anchor
+    ('return') that occurs all over the file: the tool refuses it as
+    anchor_ambiguous, and the run must recover by narrowing to the
+    repair's real anchor — refusals as data, not retries in the dark."""
+
+    def start_run(self, *, work_order, plan):
+        super().start_run(work_order=work_order, plan=plan)
+        reads = [s for s in self._queue if s.tool == "read_file"]
+        rest = [s for s in self._queue if s.tool != "read_file"]
+        target = plan["files"][0]
+        self._queue = (
+            reads
+            + [Step("edit_file", {"path": target, "old": "return", "new": "return"})]
+            + rest
+        )
+
+
+def tool_depth_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 4: an ambiguous first edit refuses by name, is recorded
+    verbatim on the audit trail, and the run still lands the repair
+    with the narrowed anchor."""
+    task = suite.get("bulk-tier-boundary")
+    original = service_module.make_model
+    service_module.make_model = (
+        lambda profile_id, scripts=None, **_kw: _AmbiguousFirstModel(
+            scripts=scripts
+        )
+    )
+    try:
+        service = _offline_service(scratch, "tool-depth")
+        order = service.create_gold_work_order(task.id, actor="evals")
+        wid = order["work_order_id"]
+        service.draft_plan(wid, actor="evals")
+        service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+        run = service.start_run(wid, actor="evals")
+    finally:
+        service_module.make_model = original
+    check(
+        "tool depth: the run recovers and verifies",
+        run["status"] == "succeeded"
+        and run["verification"].get("passed")
+        and run["changed_files"] == task.file_scope,
+        f"run {run['status']}; changed {run['changed_files']}",
+    )
+    calls = [
+        a["detail"] for a in service.audit(wid) if a["event"] == "tool_call"
+    ]
+    edits = [c for c in calls if c["tool"] == "edit_file"]
+    refusal = edits[0].get("result") or {}
+    landed = edits[1].get("result") or {}
+    check(
+        "tool depth: the refusal is a stored record with its name",
+        edits[0]["refused"] is True
+        and refusal.get("code") == "anchor_ambiguous"
+        and "anchor occurs" in refusal.get("output", ""),
+        f"first edit refused as {refusal.get('code')}",
+    )
+    detail = landed.get("detail") or {}
+    check(
+        "tool depth: the landed edit records its anchor and digests",
+        landed.get("ok") is True
+        and bool(detail.get("anchor_sha256"))
+        and detail.get("before_sha256") != detail.get("after_sha256"),
+        "anchor + before/after digests on the successful edit's record",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -349,6 +428,7 @@ def main() -> int:
     live_leg(suite, scratch, check)
     staleness_leg(suite, scratch, check)
     amendment_leg(suite, scratch, check)
+    tool_depth_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
