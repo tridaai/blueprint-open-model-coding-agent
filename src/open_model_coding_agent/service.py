@@ -37,7 +37,7 @@ from .logging_setup import log_event
 from .model_port import Step, make_model, validate_plan_draft
 from .models import Plan, PlanStep, Run, WorkOrder, WorkOrderIn
 from .patch import PatchError, apply_patch, build_patch
-from .plans import drifted_files, file_digests, scope_fingerprint
+from .plans import diff_plans, drifted_files, file_digests, scope_fingerprint
 from .store import SqlStore, utcnow
 from .tools import SandboxTools, dispatch
 
@@ -311,6 +311,68 @@ class CodingService:
             scope_fingerprint=plan.get("scope_fingerprint"),
         )
         return plan
+
+    def amend_plan(self, work_order_id: str, *, draft, actor: str) -> dict:
+        """Amend the approved plan. The amendment is a new version,
+        never an edit in place: it arrives as a full replacement
+        draft, is diffed against the version it supersedes, and the
+        diff is stored on the new version's record.
+
+        Two rules bind it. The scope ceiling: the amendment's files
+        must stay inside the *work order's* approved scope — widening
+        past it is refused as ``scope_widening_refused`` (narrowing,
+        or moving within the scope, is the amendment's business). And
+        the approval binding: the new version starts undecided and
+        the order returns to plan_ready — the approval recorded
+        against the old version does not carry to this one.
+        Amending is possible only before execution starts, while the
+        order stands approved."""
+        order = self._require_order(work_order_id)
+        previous = self.store.get_plan(work_order_id)
+        if (
+            order["status"] != "approved"
+            or previous is None
+            or previous["status"] != "approved"
+        ):
+            raise GateError(
+                "plan_not_amendable",
+                f"only an approved plan can be amended, before execution "
+                f"starts (work order {work_order_id} is {order['status']})",
+            )
+        outside = [f for f in draft.files if f not in set(order["file_scope"])]
+        if outside:
+            raise GateError(
+                "scope_widening_refused",
+                f"the amendment names files outside the work order's "
+                f"approved scope {order['file_scope']}: {outside}; the work "
+                f"order's scope is the ceiling an amendment cannot widen past",
+            )
+        self._validate_draft(draft, order)
+        plan = Plan(
+            work_order_id=work_order_id,
+            version=previous["version"] + 1,
+            approach=draft.approach,
+            steps=[PlanStep(**step.as_dict()) for step in draft.steps],
+            files=draft.files,
+            tests=draft.tests,
+            model_profile=previous["model_profile"],
+            amended_by=actor,
+            created_at=utcnow(),
+        )
+        payload = plan.model_dump()
+        payload["diff_from_previous"] = diff_plans(previous, payload)
+        self.store.put_plan(payload)
+        self._set_status(order, "plan_ready")
+        diff = payload["diff_from_previous"]
+        self._audit(
+            "work_order", work_order_id, "plan_amended", actor,
+            from_version=previous["version"], to_version=plan.version,
+            steps_added=len(diff["steps_added"]),
+            steps_removed=len(diff["steps_removed"]),
+            steps_changed=len(diff["steps_changed"]),
+            files_added=diff["files_added"], files_removed=diff["files_removed"],
+        )
+        return payload
 
     # -- runs ----------------------------------------------------------------
     def _refuse_if_stale(self, order: dict, plan: dict, actor: str) -> None:

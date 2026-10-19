@@ -16,7 +16,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from .config import load_settings
 from .errors import GateError
 from .logging_setup import request_id_var
-from .models import PlanDecisionIn, ReviewDecisionIn, WorkOrderIn
+from .model_port import PlanDraft, PlanStepDraft
+from .models import (
+    AmendPlanIn,
+    PlanDecisionIn,
+    ReviewDecisionIn,
+    RunStartIn,
+    WorkOrderIn,
+)
 from .service import CodingService
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -109,9 +116,25 @@ def create_app(settings=None) -> FastAPI:
             work_order_id, approve=body.approve, actor=body.actor, note=body.note
         )
 
+    @app.post("/api/work-orders/{work_order_id}/plan/amend")
+    def amend_plan(work_order_id: str, body: AmendPlanIn):
+        draft = PlanDraft(
+            approach=body.approach,
+            steps=[
+                PlanStepDraft(
+                    intent=step.intent, files=list(step.files), tests=list(step.tests)
+                )
+                for step in body.steps
+            ],
+        )
+        return service.amend_plan(work_order_id, draft=draft, actor=body.actor)
+
     @app.post("/api/work-orders/{work_order_id}/runs", status_code=201)
-    def start_run(work_order_id: str):
-        return service.start_run(work_order_id)
+    def start_run(work_order_id: str, body: RunStartIn | None = None):
+        body = body or RunStartIn()
+        return service.start_run(
+            work_order_id, actor=body.actor, plan_version=body.plan_version
+        )
 
     @app.post("/api/work-orders/{work_order_id}/review")
     def decide_review(work_order_id: str, body: ReviewDecisionIn):

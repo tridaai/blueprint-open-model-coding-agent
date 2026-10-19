@@ -13,6 +13,9 @@ from pydantic import BaseModel, Field
 #   draft -> plan_ready -> approved -> running -> succeeded -> accepted
 #                  |            |           |             -> rejected
 #                  -> plan_rejected         -> failed
+#   approved -> plan_ready when a plan amendment lands (the new
+#   version awaits its own decision), and approved -> draft when
+#   execution refuses a stale plan (a fresh plan must be drafted).
 WORK_ORDER_STATUSES = (
     "draft",
     "plan_ready",
