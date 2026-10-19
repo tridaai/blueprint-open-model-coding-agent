@@ -343,11 +343,90 @@ failures and interruptions included, divided by its verified
 SUCCEEDED runs. That is the webinar's headline metric, and it is
 honest only with the failures in the numerator.
 
+## The promotion gate (round 7)
+
+**The benchmark is the team's own work.** The gold suite splits
+into two named sets (`benchmarks.py`): **tuning** (the four
+single-file repairs) and **held-out** (the boundary fix and the
+two-file feature). The split is fixed data and must partition the
+suite — every task in exactly one set — or benchmarking refuses.
+Tuning is where a profile's behaviour may be studied and adjusted;
+held-out is where promotion is judged, and nothing is tuned
+against it. Each set is named by a **content hash**: SHA-256 over a
+canonical manifest of its tasks (specs, broken and fixed overlays,
+grading tests). Add a task, edit a defect, touch a grading test —
+the hash moves, and every benchmark or evaluation recorded under
+the old hash is stale by construction. Re-running the benchmark
+is the only way back; no edit makes an old result current.
+
+**A benchmark is the real path, recorded.** `run_benchmark` builds
+a sibling service over the same store, pinned to the candidate
+profile, and runs each task as a gold work order end to end —
+draft, plan approval by the benchmark actor, sandboxed run,
+verification in code. The record stores per-task outcomes
+(verified success, or the failure class: `run_failed`,
+`run_interrupted`, a gate refusal by name), usage, priced cost,
+and the set hash. Two failure classes are **zero-tolerance** — an
+edit landing outside the approved scope, a run standing SUCCEEDED
+without a passing verification. The tool port and verification
+make both structurally unreachable (scope is enforced at the edit;
+SUCCEEDED is only ever the verification's verdict), and the gate
+checks the stored records anyway: it trusts records, not arguments
+about why they must be fine.
+
+**Worst-of-N decides.** A promotion evaluation runs the held-out
+set `DEFAULT_EVALUATION_RUNS` (3) times and folds the runs into one
+stored record: the score is the **worst** run's verified successes,
+and any zero-tolerance violation in any run fails the evaluation
+outright, whatever the counts say. One good run is weather; the
+worst of three is a claim a deployment can stand behind. The
+latest evaluation is the one a promotion judges by — a newer one
+supersedes an older one by being later, so results cannot be
+shopped.
+
+**Promotion is a judged act.** `promote(profile, actor,
+rationale)` moves the default only when, in order: a held-out
+evaluation for the candidate **exists** (`no_passing_evaluation`),
+is **current** (`evaluation_stale` — its hash is the set's hash
+now), and **passed** (`no_passing_evaluation` — a violation in any
+run is disqualifying); the actor is **not the evaluation's actor**,
+compared by normalised name (`self_promotion`); and the
+candidate's worst run does **not regress** against the incumbent
+default's own recorded baseline — its latest current-hash held-out
+evaluation (`regression`). The incumbent's baseline is measured
+the same way the candidate's is: by running it. Before the first
+promotion, a deployment records the seeded default's baseline with
+the same `evaluate_profile` act; the gate refuses to judge a
+candidate against a bar nobody measured. The bar is **no
+regression, not must-beat**: an equal candidate promotes — the
+byte-identical-copy control in the tests and the eval pack proves
+it — because a profile is earned on evidence, not on beating a
+teammate by a point.
+
+**The default is a stored record.** Promotion and rollback are
+append-only events (migration 0005); the current default is the
+latest event's target, and the configured profile (`MODEL_PROFILE`)
+is only the seed a deployment starts with. A primary service
+serves the governed default — plans, runs, and usage rows are
+stamped with it — resolving a promoted profile through the same
+rules as the configured one (its record, the deployment's
+validated overrides, the live key check). **Rollback** restores
+the previous default as its own event: it needs no evaluation,
+because it returns to a state that was itself promoted on
+evidence, and it is refused only when no history exists
+(`no_promotion_history`). The surfaces follow the records:
+`/readiness` names the default, `GET /api/promotions` returns the
+whole position (sets and current hashes, evaluations, history),
+and the console renders them beside the cost fold — the two halves
+of the webinar's discipline side by side: what the work costs per
+successful task, and what a model must prove before it does the
+work by default.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
 staleness · R4 tool depth · R5 failure recovery · R6 budgets
-+ cost ledger (this round) · R7 model promotion gate · R8 shortlist comparison ·
++ cost ledger · R7 model promotion gate (this round) · R8 shortlist comparison ·
 R9 injection red team · R10 verification depth · R11 review
 workbench · R12 task library · R13 challenge pass · R14 batch work
 orders · R15 observability · R16 deployment profiles · R17 MCP
@@ -355,7 +434,7 @@ surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
 prod smoke).
 
-## Honest limits (round 6)
+## Honest limits (round 7)
 
 - The live Baseten adapter is built to Baseten's documented
   OpenAI-compatible shape and is exercised end to end in tests and
@@ -381,3 +460,12 @@ prod smoke).
   history, which the audit records deliberately summarise rather
   than keep verbatim. The workspace, not the transcript, is the
   ground truth a resume is checked against.
+- The promotion gate's evidence is only as strong as the held-out
+  set: two tasks, chosen as the suite's harder shapes. That is a
+  real benchmark and a small one — a deployment adopting this
+  shell grows the suite from its own merged work, which is the
+  webinar's method and the reason the set is data with a hash
+  rather than a number in code. Benchmarks are real runs: a
+  worst-of-3 held-out evaluation is six agent runs, each verified
+  by shelling out to pytest, and the gate's tests and eval leg pay
+  that cost openly rather than mocking the runs they judge.

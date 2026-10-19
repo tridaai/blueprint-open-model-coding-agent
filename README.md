@@ -158,6 +158,24 @@ make serve       # API + console on http://localhost:8000
    task** — all of a profile's priced spend, failures included,
    over its verified successes. The offline model's accounting is
    characters, labelled `scripted` — never priced as tokens.
+8. **The promotion gate (round 7).** The gold suite is split into
+   a **tuning** set and a **held-out** set, each named by a
+   content hash over its tasks — add a task or edit a defect and
+   the hash moves, and every result recorded under the old hash is
+   stale. A model profile becomes the agent's **default** only by
+   evidence: a benchmark runs the candidate through this same
+   shell (work orders, plan gate, runs, verification in code) and
+   stores the record; a promotion evaluation runs the held-out set
+   three times and is scored by its **worst** run, with any
+   out-of-scope edit or unverified success in any run failing it
+   outright. Promotion itself is a judged act — it needs that
+   passing, current evaluation, a judge who is not the evaluator,
+   and no regression against the incumbent default's own recorded
+   baseline (an equal score promotes; the bar is no regression,
+   not must-beat). The default is a stored record: promotion and
+   rollback are append-only events, and the console shows the
+   whole gate — sets and hashes, evaluations, history — beside
+   the cost fold.
 
 ## The gold suite (v1)
 
@@ -173,6 +191,11 @@ reference fix.
 | Cancelling an order never releases its stock | bug fix | `workshop/orders.py` |
 | Ten-unit orders miss the bulk discount | boundary fix | `workshop/pricing.py` |
 | Orders cannot take a coupon | feature, two files | `workshop/pricing.py`, `workshop/orders.py` |
+
+For the promotion gate the suite is split: **tuning** — the four
+single-file repairs — and **held-out** — the boundary fix and the
+two-file coupon feature. Promotion is judged on held-out only;
+nothing is tuned against it.
 
 `make evals` grades all six end to end through the service, plus
 the construction proof, a gate check per task, and legs for the
@@ -199,15 +222,25 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–6 are built and gated: **101 tests passing, evals PASS**
+Rounds 1–7 are built and gated: **109 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
 run still lands its repair, an interruption leg where a run
 that dies after its first edit resumes to a verified success
-without re-applying it, and a costing leg that prices a live-path
-run plan-vs-execution and folds cost per successful task;
-counters at zero). Runs now record
+without re-applying it, a costing leg that prices a live-path
+run plan-vs-execution and folds cost per successful task, and a
+promotion leg that measures the incumbent's held-out baseline and
+a copy candidate at the gate's full worst-of-3, refuses the
+evaluator's self-promotion, promotes through a second actor,
+rolls back, and refuses a regressed candidate; counters at zero).
+The default model profile is now earned, not configured: the gold
+suite is split tuning/held-out under content hashes, a profile is
+benchmarked through the real service path with the records
+stored, and promotion — a judged act with named refusals
+(`no_passing_evaluation`, `evaluation_stale`, `regression`,
+`self_promotion`) — moves the default as an append-only record,
+with rollback as its own recorded act. Runs now record
 checkpoints as they work, and a run that dies mid-flight lands
 INTERRUPTED — resumable when its basis (plan, target, workspace)
 checks out in code, restartable under the same approval, or
@@ -225,8 +258,8 @@ has **not yet been run against the real Baseten endpoint**, which
 needs a `BASETEN_API_KEY`; the first live smoke is a deployment
 step, and this status will say so until it has happened. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: the model promotion gate
-(round 7), and the shortlist comparison (round 8). The Postgres
+`docs/architecture.md`: the shortlist comparison (round 8), which
+will consume the promotion gate's records. The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.
