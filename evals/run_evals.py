@@ -36,6 +36,7 @@ from open_model_coding_agent.baseten import HttpResponse  # noqa: E402
 from open_model_coding_agent.config import load_settings  # noqa: E402
 from open_model_coding_agent.errors import GateError  # noqa: E402
 from open_model_coding_agent.gold import GoldSuite  # noqa: E402
+from open_model_coding_agent.model_port import PlanDraft, PlanStepDraft  # noqa: E402
 from open_model_coding_agent.service import CodingService  # noqa: E402
 from open_model_coding_agent.tools import SandboxTools  # noqa: E402
 
@@ -156,6 +157,114 @@ def live_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def _offline_service(scratch: Path, leg: str) -> CodingService:
+    settings = load_settings(
+        sqlite_path=str(scratch / leg / "codingagent.db"),
+        targets_dir=scratch / leg / "targets",
+        runs_dir=scratch / leg / "runs",
+        artifacts_dir=scratch / leg / "artifacts",
+    )
+    return CodingService(settings)
+
+
+def staleness_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 3: an approved plan is bound to the repo it was approved
+    against. Drift inside the scope refuses the run as stale_plan and
+    sends the order back to draft; a fresh plan then runs."""
+    task = suite.get("tax-before-discount")
+    service = _offline_service(scratch, "staleness")
+    order = service.create_gold_work_order(task.id, actor="evals")
+    wid = order["work_order_id"]
+    service.draft_plan(wid, actor="evals")
+    service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+    target_file = Path(order["target_path"]) / task.file_scope[0]
+    target_file.write_text(target_file.read_text() + "\n# someone else was here\n")
+    code = None
+    try:
+        service.start_run(wid, actor="evals")
+    except GateError as exc:
+        code = exc.code
+    check(
+        "staleness: drift inside the scope refuses the run",
+        code == "stale_plan"
+        and service.get_work_order(wid)["status"] == "draft"
+        and any(
+            a["event"] == "stale_plan_refused" for a in service.audit(wid)
+        ),
+        f"refusal {code}; order back at draft with the refusal recorded",
+    )
+    service.draft_plan(wid, actor="evals")
+    service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+    run = service.start_run(wid, actor="evals")
+    check(
+        "staleness: a fresh plan runs against the moved repo",
+        run["status"] == "succeeded" and run["plan_version"] == 2,
+        f"run {run['status']} on plan v{run['plan_version']}",
+    )
+
+
+def amendment_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 3: an amendment is a new version with a recorded diff,
+    and the approval binds the version — v1's approval does not carry
+    to v2, naming v1 refuses as plan_superseded, and v2 runs only on
+    its own approval."""
+    task = suite.get("low-stock-report")
+    service = _offline_service(scratch, "amendment")
+    order = service.create_gold_work_order(task.id, actor="evals")
+    wid = order["work_order_id"]
+    service.draft_plan(wid, actor="evals")
+    service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+    grading = task.grading_relpath()
+    amended = service.amend_plan(
+        wid,
+        draft=PlanDraft(
+            approach="The same implementation, planned in two steps.",
+            steps=[
+                PlanStepDraft(
+                    intent="Read StockLedger.low_stock and the available() "
+                    "read it must be built from.",
+                    files=list(task.file_scope),
+                    tests=[grading],
+                ),
+                PlanStepDraft(
+                    intent=task.plan_steps[0]["intent"],
+                    files=list(task.file_scope),
+                    tests=[grading],
+                ),
+            ],
+        ),
+        actor="Eval Lead",
+    )
+    diff = amended["diff_from_previous"] or {}
+    check(
+        "amendment: the new version carries its recorded diff",
+        amended["version"] == 2
+        and diff.get("from_version") == 1
+        and diff.get("to_version") == 2
+        and len(diff.get("steps_added") or []) == 1,
+        f"v1 -> v2; steps added {len(diff.get('steps_added') or [])}",
+    )
+    codes = {}
+    for label, kwargs in (("pinned", {"plan_version": 1}), ("plain", {})):
+        try:
+            service.start_run(wid, actor="evals", **kwargs)
+        except GateError as exc:
+            codes[label] = exc.code
+    check(
+        "amendment: the old approval does not carry to the new version",
+        codes.get("pinned") == "plan_superseded"
+        and codes.get("plain") == "plan_not_approved",
+        f"pinned v1: {codes.get('pinned')}; unpinned: {codes.get('plain')}",
+    )
+    service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+    run = service.start_run(wid, actor="evals")
+    check(
+        "amendment: the amended plan runs on its own approval",
+        run["status"] == "succeeded" and run["plan_version"] == 2,
+        f"run {run['status']} on plan v{run['plan_version']}",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -233,6 +342,8 @@ def main() -> int:
         )
 
     live_leg(suite, scratch, check)
+    staleness_leg(suite, scratch, check)
+    amendment_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
