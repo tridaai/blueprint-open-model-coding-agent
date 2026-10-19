@@ -34,6 +34,21 @@ in these tools, and the tools enforce, in code:
   existing test files inside the workspace. There is no shell, no
   arbitrary command, and the child environment is scrubbed of every
   credential-looking variable before anything runs.
+- **Symlinks are never followed.** A path named directly resolves
+  first, and a symlink pointing outside the workspace refuses by
+  name; listings and searches skip symlink entries entirely, so a
+  link planted in the target repo cannot smuggle outside content
+  into a result the model reads.
+- **Grading runs are isolated runs.** When the shell grades (its own
+  verification, never the model's in-run checks), pytest runs with
+  ``--noconftest`` and the repo's own ``addopts`` overridden away:
+  files the target repo carries cannot weaken collection, skip the
+  grading tests, or patch the code under test before the grading
+  tests import it. The run's evidence is the JUnit report pytest
+  writes — the grading counts (tests, failures, errors, skipped)
+  are read from it, and a grading run counts as passed only when
+  every grading test actually ran and passed: an exit code of zero
+  over tests that were skipped or deselected proves nothing.
 
 Every result is structured: ``ok``, the human-readable ``output``, a
 ``refused`` flag, a stable ``code`` naming a refusal, and a
@@ -50,6 +65,8 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 SENSITIVE_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL")
@@ -152,11 +169,17 @@ class SandboxTools:
         return path.relative_to(self.root).as_posix()
 
     def _workspace_files(self) -> list[Path]:
+        # Symlink entries are excluded wholesale: a link planted in
+        # the target repo pointing outside the workspace must not
+        # feed its target's content into a listing, a search, or the
+        # affected-test scan. Named access to a symlink still goes
+        # through _resolve, which refuses the escape by name.
         return [
             path
             for path in sorted(self.root.rglob("*"))
             if not any(part in _EXCLUDED_DIRS for part in path.parts)
             and path.is_file()
+            and not path.is_symlink()
         ]
 
     def _read_text(self, target: Path) -> str | None:
@@ -514,7 +537,7 @@ class SandboxTools:
 
     # -- the one allowed command shape ------------------------------------
     def run_tests(
-        self, paths: list[str], affected_only: bool = False
+        self, paths: list[str], affected_only: bool = False, *, grading: bool = False
     ) -> ToolResult:
         """Run pytest over named test files — the only command there is.
 
@@ -530,6 +553,11 @@ class SandboxTools:
         (the grading set) are reported as not-in-workspace in the
         result's detail — verification runs those itself, on the
         pristine copy.
+
+        With ``grading`` (the shell's own verification only), the run
+        is isolated from the repo it grades — no conftest, no repo
+        ``addopts`` — and its result carries the grading evidence
+        read from pytest's JUnit report; see :meth:`_run_pytest`.
         """
         if affected_only:
             affected = self.affected_tests()
@@ -563,7 +591,7 @@ class SandboxTools:
                     code="no_affected_tests",
                     detail=detail,
                 )
-            result = self._run_pytest(runnable)
+            result = self._run_pytest(runnable, grading=grading)
             result.detail = {**result.detail, **detail}
             return result
         if not paths:
@@ -583,10 +611,29 @@ class SandboxTools:
                     code="not_a_test_file",
                     detail={"path": rel},
                 )
-        return self._run_pytest(paths)
+        return self._run_pytest(paths, grading=grading)
 
-    def _run_pytest(self, paths: list[str]) -> ToolResult:
-        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *paths]
+    def _run_pytest(self, paths: list[str], *, grading: bool = False) -> ToolResult:
+        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+        report_path: Path | None = None
+        if grading:
+            # Isolation from the tree being graded: --noconftest keeps
+            # repo-carried conftest hooks (skip-marking, collection
+            # edits, monkeypatching the code under test) out of the
+            # verdict, and -o addopts= overrides whatever the repo's
+            # own pytest configuration tried to add to the command.
+            # The JUnit report is the evidence the verdict reads.
+            fd, raw = tempfile.mkstemp(prefix="grading-", suffix=".xml")
+            os.close(fd)
+            report_path = Path(raw)
+            cmd += [
+                "--noconftest",
+                "-o",
+                "addopts=",
+                "--junitxml",
+                str(report_path),
+            ]
+        cmd += list(paths)
         try:
             proc = subprocess.run(
                 cmd,
@@ -597,6 +644,8 @@ class SandboxTools:
                 timeout=self.test_timeout,
             )
         except subprocess.TimeoutExpired:
+            if report_path is not None:
+                report_path.unlink(missing_ok=True)
             return ToolResult(
                 False,
                 f"test run exceeded {self.test_timeout}s and was stopped",
@@ -604,12 +653,76 @@ class SandboxTools:
                 detail={"paths": list(paths)},
             )
         output = (proc.stdout + proc.stderr).strip()
-        return ToolResult(
-            proc.returncode == 0,
-            output or "(no output)",
-            code=None if proc.returncode == 0 else "tests_failed",
-            detail={"paths": list(paths)},
+        if not grading:
+            return ToolResult(
+                proc.returncode == 0,
+                output or "(no output)",
+                code=None if proc.returncode == 0 else "tests_failed",
+                detail={"paths": list(paths)},
+            )
+        evidence = _grading_evidence(report_path) if report_path else None
+        if report_path is not None:
+            report_path.unlink(missing_ok=True)
+        if proc.returncode != 0:
+            return ToolResult(
+                False,
+                output or "(no output)",
+                code="tests_failed",
+                detail={"paths": list(paths), "grading": evidence},
+            )
+        if evidence is None:
+            return ToolResult(
+                False,
+                (output or "(no output)")
+                + "\ngrading evidence missing: pytest wrote no readable "
+                "JUnit report, so the run proves nothing",
+                code="grading_evidence_missing",
+                detail={"paths": list(paths), "grading": None},
+            )
+        fully_run = (
+            evidence["tests"] > 0
+            and evidence["failures"] == 0
+            and evidence["errors"] == 0
+            and evidence["skipped"] == 0
         )
+        if not fully_run:
+            return ToolResult(
+                False,
+                (output or "(no output)")
+                + f"\ngrading incomplete: of {evidence['tests']} grading "
+                f"tests, {evidence['skipped']} were skipped and "
+                f"{evidence['failures'] + evidence['errors']} did not pass "
+                f"— a verdict requires every grading test to run and pass",
+                code="grading_not_fully_run",
+                detail={"paths": list(paths), "grading": evidence},
+            )
+        return ToolResult(
+            True,
+            output or "(no output)",
+            detail={"paths": list(paths), "grading": evidence},
+        )
+
+
+def _grading_evidence(report_path: Path) -> dict | None:
+    """The grading counts from a pytest JUnit report — how many
+    tests were collected and run, and how many failed, errored, or
+    were skipped. None when the report is missing or unreadable: a
+    grading run without evidence is not a pass."""
+    try:
+        root = ET.parse(report_path).getroot()
+    except (ET.ParseError, OSError):
+        return None
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    if not suites:
+        return None
+    evidence = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+    for suite in suites:
+        for name in evidence:
+            try:
+                evidence[name] += int(suite.get(name) or 0)
+            except ValueError:
+                return None
+    return evidence
 
 
 _IMPORT_RE = re.compile(r"^\s*import\s+([A-Za-z_][\w.]*)")

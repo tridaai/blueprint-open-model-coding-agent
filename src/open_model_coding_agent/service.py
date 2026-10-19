@@ -124,6 +124,21 @@ from .tools import SandboxTools, dispatch
 
 _IGNORE = shutil.ignore_patterns("__pycache__", ".git", ".pytest_cache", "*.pyc")
 
+
+def _copy_ignore(directory: str, names: list[str]) -> set[str]:
+    """What a tree copy leaves behind: the usual debris, and every
+    symlink. ``copytree`` dereferences links by default, which would
+    pull whatever a target repo's links point at — files outside the
+    repo — into the workspace, the pristine snapshot, and the
+    verification copy as if they were repo content. Links are
+    dropped at the copy, so nothing downstream ever sees their
+    targets."""
+    ignored = set(_IGNORE(directory, names))
+    for name in names:
+        if Path(directory, name).is_symlink():
+            ignored.add(name)
+    return ignored
+
 # Model failures that mean "the world hiccupped", not "the work is
 # wrong": the provider stayed rate-limited, overloaded, erroring, or
 # unreachable through the adapter's bounded retries. A run that dies
@@ -1019,7 +1034,7 @@ class CodingService:
         if target.exists():
             shutil.rmtree(target)
         workshop_src = self.settings.gold_dir.parent.parent / "workshop"
-        shutil.copytree(workshop_src, target / "workshop", ignore=_IGNORE)
+        shutil.copytree(workshop_src, target / "workshop", ignore=_copy_ignore)
         for rel, content in task.broken_files().items():
             dest = target / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1346,8 +1361,8 @@ class CodingService:
                 raise GateError(
                     "target_missing", f"target repo {target} does not exist on disk"
                 )
-            shutil.copytree(target, workspace, ignore=_IGNORE)
-            shutil.copytree(target, pristine, ignore=_IGNORE)
+            shutil.copytree(target, workspace, ignore=_copy_ignore)
+            shutil.copytree(target, pristine, ignore=_copy_ignore)
             run = Run(
                 run_id=run_id,
                 work_order_id=work_order_id,
@@ -2022,7 +2037,7 @@ class CodingService:
         verify_dir = pristine.parent / "verify"
         if verify_dir.exists():
             shutil.rmtree(verify_dir)
-        shutil.copytree(pristine, verify_dir, ignore=_IGNORE)
+        shutil.copytree(pristine, verify_dir, ignore=_copy_ignore)
         try:
             apply_patch(verify_dir, patch_text)
         except PatchError as exc:
@@ -2033,18 +2048,48 @@ class CodingService:
                 "passed": False,
                 "reason": "no grading tests named for this work order",
             }
+        neutralised = self._neutralise_startup_files(verify_dir)
         tools = SandboxTools(
             verify_dir, scope=[], test_timeout=self.settings.policy.test_timeout_seconds
         )
-        result = tools.run_tests(grading_paths)
+        result = tools.run_tests(grading_paths, grading=True)
+        evidence = (result.detail or {}).get("grading")
+        if result.ok:
+            reason = "grading tests pass on the patched pristine copy"
+        elif result.code == "grading_not_fully_run":
+            reason = (
+                "grading tests did not all run and pass on the patched "
+                f"pristine copy (evidence: {evidence})"
+            )
+        else:
+            reason = "grading tests fail on the patched pristine copy"
         return {
             "passed": result.ok,
-            "reason": "grading tests pass on the patched pristine copy"
-            if result.ok
-            else "grading tests fail on the patched pristine copy",
+            "reason": reason,
             "grading_tests": grading_paths,
             "grading_output": result.output[-2000:],
+            "grading_evidence": evidence,
+            "neutralised_startup_files": neutralised,
         }
+
+    @staticmethod
+    def _neutralise_startup_files(verify_dir: Path) -> list[str]:
+        """Set aside interpreter startup files in the verification
+        copy. The grading child runs with the copy on PYTHONPATH, so
+        a ``sitecustomize.py`` / ``usercustomize.py`` the target repo
+        carries at its root would be imported by the interpreter
+        before pytest starts and could patch the code under test —
+        the code-execution cousin of a hostile conftest. The verify
+        copy is the shell's throwaway, so the files are renamed
+        aside there (the run's workspace and the source repo keep
+        theirs), and the names are recorded on the verdict."""
+        neutralised: list[str] = []
+        for name in ("sitecustomize.py", "usercustomize.py"):
+            candidate = verify_dir / name
+            if candidate.is_file() and not candidate.is_symlink():
+                candidate.rename(verify_dir / f"{name}.shell-disabled")
+                neutralised.append(name)
+        return neutralised
 
     def _stage_grading(self, order: dict, verify_dir: Path) -> list[str]:
         """Place the grading tests into the verification copy only.

@@ -21,7 +21,10 @@ def _tree_files(root: Path) -> dict[str, str]:
     for path in sorted(root.rglob("*")):
         if any(part in _EXCLUDED_DIRS for part in path.parts):
             continue
-        if path.is_file():
+        # A symlink is not patch content: following it would read
+        # whatever it points at — possibly outside the tree — into
+        # the diff. Links are skipped, never dereferenced.
+        if path.is_file() and not path.is_symlink():
             out[path.relative_to(root).as_posix()] = path.read_text()
     return out
 
