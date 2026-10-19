@@ -1,6 +1,11 @@
 """The service: work orders, the plan gate, runs, verification, review.
 
 This is the governance shell. The model proposes; the shell disposes:
+every plan draft passes the port's shared validator, whichever model
+produced it; every model call's usage is drained from the port and
+stored against the work order (and the run, during execution); and a
+model-side failure during a run ends that run FAILED with the named
+reason recorded, rather than crashing the shell.
 
 - A work order is a stored record with a state machine. Nothing runs
   without a plan, and nothing runs from an unapproved plan —
@@ -29,7 +34,7 @@ from .config import Settings
 from .errors import GateError
 from .gold import GoldSuite
 from .logging_setup import log_event
-from .model_port import Step, make_model
+from .model_port import Step, make_model, validate_plan_draft
 from .models import Plan, Run, WorkOrder, WorkOrderIn
 from .patch import PatchError, apply_patch, build_patch
 from .store import SqlStore, utcnow
@@ -53,6 +58,39 @@ class CodingService:
     # -- audit ---------------------------------------------------------
     def _audit(self, entity: str, entity_id: str, event: str, actor: str, **detail):
         self.store.append_audit(entity, entity_id, event, actor, detail)
+
+    # -- model usage -----------------------------------------------------
+    def _persist_usage(self, model, *, work_order_id: str, run_id: str | None) -> None:
+        """Drain the model's accounting into stored usage records,
+        stamped with the call's context and the serving profile."""
+        for record in model.drain_usage():
+            self.store.append_usage(
+                {
+                    **record,
+                    "run_id": run_id,
+                    "work_order_id": work_order_id,
+                    "profile_id": self.settings.model_profile,
+                }
+            )
+
+    def _attach_usage(self, run: dict) -> dict:
+        rows = self.store.list_usage(run_id=run["run_id"])
+        run["usage"] = rows
+        run["usage_totals"] = {
+            "calls": len(rows),
+            "prompt_tokens": sum(r["prompt_tokens"] for r in rows),
+            "completion_tokens": sum(r["completion_tokens"] for r in rows),
+            "latency_ms": sum(r["latency_ms"] for r in rows),
+        }
+        return run
+
+    def _make_model(self, *, scripts=None):
+        return make_model(
+            self.settings.model_profile,
+            scripts=scripts,
+            profile=self.settings.profile,
+            transport=self.settings.model_transport,
+        )
 
     def audit(self, work_order_id: str) -> list[dict]:
         return self.store.list_audit("work_order", work_order_id)
@@ -132,10 +170,12 @@ class CodingService:
         order = self.store.get_work_order(work_order_id)
         if order is None:
             return None
+        runs = [self._attach_usage(r) for r in self.store.list_runs(work_order_id)]
         return {
             "work_order": order,
             "plan": self.store.get_plan(work_order_id),
-            "runs": self.store.list_runs(work_order_id),
+            "runs": runs,
+            "usage": self.store.list_usage(work_order_id=work_order_id),
             "audit": self.audit(work_order_id),
         }
 
@@ -158,12 +198,17 @@ class CodingService:
             if target.is_dir()
             else []
         )
-        model = make_model(self.settings.model_profile)
+        model = self._make_model()
         plan_input = dict(order)
         gold = self.gold.get(order["gold_task_id"]) if order.get("gold_task_id") else None
         if gold is not None:
             plan_input["_plan_approach"] = gold.plan_approach
-        draft = model.draft_plan(work_order=plan_input, repo_files=repo_files)
+        try:
+            draft = model.draft_plan(work_order=plan_input, repo_files=repo_files)
+        finally:
+            self._persist_usage(model, work_order_id=work_order_id, run_id=None)
+        # One validator for every model's draft, scripted or live.
+        validate_plan_draft(draft, file_scope=list(order["file_scope"]))
         plan = Plan(
             work_order_id=work_order_id,
             version=1,
@@ -219,7 +264,7 @@ class CodingService:
         gold = self.gold.get(order["gold_task_id"]) if order.get("gold_task_id") else None
         if gold is not None:
             scripts[gold.id] = gold.scripted_edits
-        model = make_model(self.settings.model_profile, scripts=scripts)
+        model = self._make_model(scripts=scripts)
 
         run_id = _new_id("run")
         run_dir = self.settings.runs_dir / run_id
@@ -255,35 +300,71 @@ class CodingService:
             scope=plan["files"],
             test_timeout=self.settings.policy.test_timeout_seconds,
         )
-        model.start_run(work_order=order, plan=plan)
         transcript: list[dict] = []
         steps = 0
         max_steps = self.settings.policy.max_steps
-        while steps < max_steps:
-            step: Step = model.next_step(transcript=transcript)
-            steps += 1
-            if step.tool == "finish":
-                transcript.append({"tool": "finish", "ok": True, "output": ""})
-                break
-            result = dispatch(tools, step)
-            entry = {
-                "tool": step.tool,
-                "args": _summarise_args(step),
-                **result.as_dict(),
-            }
-            transcript.append(entry)
-            self._audit(
-                "work_order", work_order_id, "tool_call", "agent",
-                run_id=run_id, tool=step.tool, ok=result.ok,
-                refused=result.refused, args=_summarise_args(step),
-            )
-            if result.refused and step.tool == "edit_file":
+        model_error: GateError | None = None
+        try:
+            model.start_run(work_order=order, plan=plan)
+            while steps < max_steps:
+                step: Step = model.next_step(transcript=transcript)
+                self._persist_usage(model, work_order_id=work_order_id, run_id=run_id)
+                steps += 1
+                if step.tool == "finish":
+                    transcript.append({"tool": "finish", "ok": True, "output": ""})
+                    break
+                result = dispatch(tools, step)
+                entry = {
+                    "tool": step.tool,
+                    "args": _summarise_args(step),
+                    **result.as_dict(),
+                }
+                transcript.append(entry)
                 self._audit(
-                    "work_order", work_order_id, "edit_refused", "shell",
-                    run_id=run_id, path=(step.args or {}).get("path"),
-                    reason=result.output,
+                    "work_order", work_order_id, "tool_call", "agent",
+                    run_id=run_id, tool=step.tool, ok=result.ok,
+                    refused=result.refused, args=_summarise_args(step),
                 )
+                if result.refused and step.tool == "edit_file":
+                    self._audit(
+                        "work_order", work_order_id, "edit_refused", "shell",
+                        run_id=run_id, path=(step.args or {}).get("path"),
+                        reason=result.output,
+                    )
+        except GateError as exc:
+            # A model-side failure (auth, rate limit, a malformed
+            # response) ends the run FAILED with the reason recorded —
+            # never a hang, never a silent retry, never a crash that
+            # leaves the order 'running'.
+            model_error = exc
+            self._persist_usage(model, work_order_id=work_order_id, run_id=run_id)
         run.steps_used = steps
+
+        if model_error is not None:
+            reason = f"model call failed: {model_error.code} — {model_error.message}"
+            run.status = "failed"
+            run.failure_reason = reason
+            run.verification = {
+                "passed": False,
+                "reason": reason,
+                "model_error": model_error.code,
+            }
+            run.finished_at = utcnow()
+            self.store.put_run(run.model_dump())
+            self._set_status(order, "failed")
+            self._audit(
+                "work_order", work_order_id, "model_call_failed", "shell",
+                run_id=run_id, code=model_error.code, reason=model_error.message,
+            )
+            self._audit(
+                "work_order", work_order_id, "run_failed", "shell",
+                run_id=run_id, steps_used=steps,
+            )
+            log_event(
+                "run_finished", work_order_id=work_order_id, run_id=run_id,
+                status="failed",
+            )
+            return self._attach_usage(run.model_dump())
 
         patch_text, changed = build_patch(pristine, workspace)
         run.patch = patch_text
@@ -313,7 +394,7 @@ class CodingService:
             "run_finished", work_order_id=work_order_id, run_id=run_id,
             status=run.status,
         )
-        return run.model_dump()
+        return self._attach_usage(run.model_dump())
 
     def _verify(
         self, order: dict, plan: dict, pristine: Path, patch_text: str, changed: list[str]

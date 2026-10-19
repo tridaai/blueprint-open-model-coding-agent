@@ -231,6 +231,46 @@ class SqlStore:
         runs = self.list_runs(work_order_id)
         return runs[-1] if runs else None
 
+    # -- model usage ------------------------------------------------------
+    def append_usage(self, record: dict) -> None:
+        self._write(
+            f"INSERT INTO model_usage (run_id, work_order_id, profile_id, "
+            f"model, source, unit, prompt_tokens, completion_tokens, "
+            f"latency_ms, created_at) VALUES ({self._ph}, {self._ph}, "
+            f"{self._ph}, {self._ph}, {self._ph}, {self._ph}, {self._ph}, "
+            f"{self._ph}, {self._ph}, {self._ph})",
+            (
+                record.get("run_id"),
+                record["work_order_id"],
+                record["profile_id"],
+                record.get("model"),
+                record["source"],
+                record["unit"],
+                int(record["prompt_tokens"]),
+                int(record["completion_tokens"]),
+                int(record["latency_ms"]),
+                utcnow(),
+            ),
+        )
+
+    def list_usage(
+        self, *, run_id: str | None = None, work_order_id: str | None = None
+    ) -> list[dict]:
+        clauses, params = [], []
+        if run_id is not None:
+            clauses.append(f"run_id = {self._ph}")
+            params.append(run_id)
+        if work_order_id is not None:
+            clauses.append(f"work_order_id = {self._ph}")
+            params.append(work_order_id)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        return self._all(
+            f"SELECT seq, run_id, work_order_id, profile_id, model, source, "
+            f"unit, prompt_tokens, completion_tokens, latency_ms, created_at "
+            f"FROM model_usage{where} ORDER BY seq",
+            tuple(params),
+        )
+
     # -- audit --------------------------------------------------------------
     def append_audit(
         self, entity: str, entity_id: str, event: str, actor: str, detail: dict
