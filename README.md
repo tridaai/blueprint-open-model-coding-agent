@@ -293,6 +293,50 @@ make serve       # API + console on http://localhost:8000
    promoted through benchmark evaluations — the evidence a
    template earns is its health fold, and the judgement stays a
    person's.
+12. **The challenge pass (round 13).** Verification says the
+   patch passes its grading; it does not ask whether the patch
+   is the change that was asked for. Before a review can accept,
+   a **challenge pass** takes a second, independent look —
+   deterministic rules computed from the run's **stored records
+   alone**: the patch, the approved plan, the task text, and the
+   pristine snapshot verification graded on. Never the model's
+   transcript or its account of itself. Three rules:
+   **intent creep** — the patch changes an existing function or
+   method that no plan step and no line of the task text names
+   (file-level scope is verification's; this works a level
+   down, at the symbol the diff actually touches — an untouched
+   neighbour caught in a hunk's context is not a touch, and a
+   function appended after a function is an introduction, not
+   an edit to the one above it); **single-source figures** — a
+   numeric constant in the patch that appears nowhere in the
+   task text, the plan, or the file's prior content (0 and 1
+   are exempt as structural constants: defaults and indexes,
+   not figures); and **unrequested surface** — a new public
+   function or class neither the task text nor the plan names.
+   Each fired rule stores a **challenge record** — the rule, its
+   severity (`must_answer`, or `advisory` for private symbols),
+   and the evidence: the file, the hunk, the symbol or the
+   figure itself. An unanswered must-answer challenge **refuses
+   acceptance by name** (`unanswered_challenges`, with the
+   count); advisory challenges are shown and never block. A
+   reviewer answers each challenge with a recorded act:
+   **rebut** it, naming the counter-evidence record the
+   rebuttal rests on; **downgrade** it to advisory with a reason
+   (the original severity stays on the record); or **accept
+   and revise** — the order returns through the request-changes
+   path with the challenge cited in the stored note.
+   Challenges are never deleted: when a newer run supersedes
+   the run they were raised on, they are marked superseded,
+   dispositions intact, and the pass itself is idempotent —
+   re-running it over the same run stores nothing new. They
+   ride the review packet as their own section, and the review
+   queue names the unanswered must-answer count on the entry
+   itself. The rules are deliberately conservative — a false
+   negative costs a reviewer nothing they were not already
+   doing; a false positive would train everyone to wave the
+   pass through — and the binding proof is the gold suite
+   itself: all six tasks' verified patches raise **zero**
+   must-answer challenges, checked on every eval run.
 
 ## The gold suite (v1)
 
@@ -460,9 +504,19 @@ validated in code (a path value is a single segment token, so
 traversal and scope-widening refuse by name), the skeleton
 reaching the plan draft as labelled context only, provenance
 on the order and in the review packet, and each version's
-health folded on read from the orders it produced. What is
+health folded on read from the orders it produced. The
+challenge pass (round 13) then gave the verified patch its
+second reader: deterministic rules over the stored records
+alone — never the model's account of itself — asking whether
+the patch stayed inside the intent the plan and the task text
+record (intent creep at symbol level), carried only figures
+the evidence carries (single-source figures), and grew no
+public surface nobody asked for (unrequested surface) — each
+fired rule a stored challenge a reviewer answers with a
+recorded disposition before acceptance can land, superseded
+with its run and never deleted. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: the challenge pass (round 13). The Postgres
+`docs/architecture.md`: batch work orders (round 14). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.

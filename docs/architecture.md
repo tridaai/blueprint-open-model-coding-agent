@@ -824,6 +824,145 @@ template publication on evidence; this round's design keeps the
 two governances distinct rather than borrowing the promotion
 gate's authority for a decision it was not built to judge.
 
+## The challenge pass (round 13)
+
+Verification (round 10) judges the patch as a change to code:
+its shape, its surface, its behaviour under re-grade. It does
+not ask the prior question — is this patch the change that was
+asked for? A patch can pass every grading test while quietly
+doing more than the task asked: tuning an unrelated function
+"while it was in there", inventing a threshold, or leaving a
+new public helper behind for the next reader to trip over.
+The challenge pass is the second reader whose only job is that
+question, and it reads nothing but records: the run's stored
+patch, the approved plan, the task text, and the pristine
+snapshot the run's verification graded on — the same ground
+verification stood on. The model's transcript, its step notes,
+and any account it gives of itself are not inputs; a challenge
+is computed from what the records show, so it can be recomputed
+and argued with.
+
+**The rules** (`challenges.py`, a pure module — candidates in,
+records out):
+
+- `intent_creep` — the patch changes an existing function or
+  method that no plan step and no line of the task text names.
+  File-level scope is round 10's verdict; this rule works a
+  level down, at the symbol the diff actually touches, because
+  a step's intent names symbols, not just files, and creep
+  lives inside allowed files. Attribution is by touch: removed
+  lines touch the symbol they sit in; an insertion touches the
+  symbol it lands strictly inside. Context lines are not
+  touches — a hunk whose context reaches into the next function
+  has not changed that function — and an insertion after a
+  symbol's last line is outside it, so a function appended
+  after a function is an introduction (the surface rule's
+  business), not an edit to the function above it. A public
+  unnamed symbol is `must_answer`; a private one (leading
+  underscore) is `advisory` — internal helpers drift more
+  innocently, and the reviewer should still see it.
+- `single_source_figures` — a numeric constant in an added
+  line whose value appears nowhere in the task text, the plan,
+  or the changed file's prior content: a figure the evidence
+  does not carry. Comparison is by value (`Decimal`-normalised,
+  so `100` and `100.0` are the same figure), and 0 and 1 are
+  exempt — defaults, indexes, and increments are structure,
+  not figures. `must_answer`: a magic number is exactly the
+  kind of quiet decision a reviewer exists to catch.
+- `unrequested_surface` — an added definition line introducing
+  a public function or class that the file did not already
+  define and neither the task text nor the plan names.
+  Signature changes to existing symbols are edits, not
+  introductions; private helpers are not surface. `must_answer`.
+
+One planned rule was **not** built: `weakened_tests_signal`.
+Round 10's test-surface check already names every test
+configuration file (conftest, sitecustomize, the pytest/pyproject
+configuration files) and refuses a gold patch that touches
+them at verification — such a patch never reaches SUCCEEDED,
+so a challenge rule over the same ground could never fire; and
+on ad-hoc orders a test-config touch is already on the
+verification record and shown at the review gate as a risk
+flag. Building the rule would duplicate round 10, not extend
+it.
+
+**The pass and its records.** The pass runs when a run lands
+SUCCEEDED, after verification, over the landed records — and
+can be re-run on demand over the same records. Each fired rule
+stores a challenge record (migration `0008`: `run_challenges`)
+keyed by an evidence key — a hash over the rule and its
+canonical evidence — so re-running the pass stores nothing new:
+same rule, same evidence, same challenge. That is the whole
+idempotence argument, and it is why a re-verification or a new
+patch gets a genuinely fresh pass rather than recycled
+challenges. Records carry the rule, the severity the rule
+raised (`severity`), the severity the challenge currently
+stands at (`current_severity` — a downgrade moves this, never
+the original), the evidence dict, a status (`open`, `answered`,
+`superseded`), and the disposition once answered.
+
+**The gate.** Acceptance consults the challenges before it
+consults anything else about the run: an order whose latest
+succeeded run carries an open must-answer challenge refuses
+acceptance as `unanswered_challenges`, naming the count.
+Advisory challenges never block — they are shown in the packet
+and the console and left for the reviewer's judgement. The
+refusal is a gate, not a state: answer the challenges and the
+same accept lands.
+
+**Dispositions are recorded acts**, one per challenge, each
+with actor and timestamp:
+- `rebut` — the reviewer states the challenge does not stand
+  and **cites the counter-evidence record** it rests on (the
+  plan, the task text, the verification record); a rebuttal
+  without its citation refuses. The text and the citation are
+  stored on the record.
+- `downgrade` — a must-answer challenge is stood down to
+  advisory, with a reason stored on the record; the original
+  severity stays beside it, so the pass's judgement and the
+  reviewer's are both on the record, distinguishable forever.
+- `accept_and_revise` — the challenge is upheld and the order
+  returns through round 11's request-changes path: the stored
+  review note carries the reviewer's text with the challenge
+  cited in it (its id, rule, and evidence anchor), so the next
+  plan draft sees exactly which challenge sent the work back.
+
+**Supersession.** A work order has one current run; when a
+fresh run starts, the challenges of every earlier run are
+marked `superseded` — open or answered alike, dispositions
+intact. Nothing is deleted, ever: the record of what was
+challenged on a run that no longer stands is part of the
+order's history, and an answer attempted on a superseded
+challenge refuses by name. (A resumed run is the same run —
+its challenges stand; only a fresh run supersedes.)
+
+**Surfaces.** The review packet carries the run's challenges
+as their own section — rule, severity (with the original shown
+when downgraded), evidence, disposition state — with a folded
+summary beside them; the review queue's entry for a succeeded
+order names its unanswered must-answer count, so the block is
+visible before the packet is even opened; the console renders
+both and offers the three answers inline. The API serves the
+records and takes the answers (`GET …/challenges`,
+`POST …/challenges/{id}/answer`).
+
+**The rules' stated limits.** Symbol extraction is this repo's
+own simple machinery — `ast` for parseable Python, an
+indentation scan as fallback — and naming is a word match
+against the task text and the plan's recorded words: a symbol
+the records name only in prose the pass cannot parse (a ticket
+reference, a paraphrase) will be challenged, and the rebuttal
+path exists for exactly that case. Cross-file reasoning (a
+helper edited because its caller changed) is beyond the
+records the pass reads, and macro-generated or dynamically
+defined symbols are invisible to it. The pass is deliberately
+conservative in the other direction too: figures carried by
+another changed file's prior content, or named in a *different*
+step's tests, still challenge — the evidence compared is the
+evidence each rule states, no wider. False negatives are
+accepted by design; the reviewer's eyes remain the last
+reader, now with the challenges in hand.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
@@ -919,9 +1058,12 @@ prod smoke).
   (the record says `not_applicable` rather than pretending one
   ran), and their test-surface touches are flagged, not refused:
   the review gate's human is the control there. Scope-creep
-  detection is file-level — whether an edit inside a named file
-  strays beyond its step's intent is the challenge pass's
-  question (round 13), not this round's.
+  detection at this layer is file-level; whether an edit inside
+  a named file strays beyond its step's intent is the challenge
+  pass's question, answered in round 13 at symbol level from
+  the stored records — with its own limits stated in its
+  section (naming is a word match over the records' own words;
+  cross-file reasoning is beyond what the pass reads).
 - The review workbench (round 11) is folds over the records, so
   it inherits their resolution: timestamps are second-resolution,
   so a decision taken inside the run's landing second reads a
