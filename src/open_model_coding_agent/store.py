@@ -486,6 +486,24 @@ class SqlStore:
             row["detail"] = json.loads(row["detail"])
         return rows
 
+    def list_audit_events(self, events: list[str]) -> list[dict]:
+        """Every audit record carrying one of the named events,
+        across entities, in record order. The review workbench
+        folds reviewer history from these rows: a decision is an
+        audit record (actor, timestamp, detail), so history needs
+        no table of its own."""
+        if not events:
+            return []
+        marks = ", ".join(self._ph for _ in events)
+        rows = self._all(
+            f"SELECT seq, entity, entity_id, event, actor, detail, "
+            f"created_at FROM audit WHERE event IN ({marks}) ORDER BY seq",
+            tuple(events),
+        )
+        for row in rows:
+            row["detail"] = json.loads(row["detail"])
+        return rows
+
 
 def make_store(settings: Settings) -> SqlStore:
     return SqlStore(settings)

@@ -21,6 +21,11 @@ from pydantic import BaseModel, Field
 #   approval — an approval is not consumed by a run that did not
 #   finish), and interrupted/failed -> abandoned when a human gives
 #   the run up as a recorded act.
+#   Round 11 adds changes_requested: a review decision that sends a
+#   succeeded run back — from succeeded, or from rejected (a
+#   reviewer reversing a rejection into a send-back) — to a state a
+#   fresh plan version can be drafted from, carrying the reviewer's
+#   note on the order for that draft's context.
 WORK_ORDER_STATUSES = (
     "draft",
     "plan_ready",
@@ -33,6 +38,7 @@ WORK_ORDER_STATUSES = (
     "abandoned",
     "accepted",
     "rejected",
+    "changes_requested",
 )
 
 
@@ -62,6 +68,11 @@ class WorkOrder(BaseModel):
     target_path: str = ""
     status: str = "draft"
     requested_by: str = "console"
+    # Round 11: the latest request-changes note, stored on the order
+    # by the review gate. The next plan draft is made with this note
+    # in its context — it is how a reviewer's "send it back" reaches
+    # the planner, as a stored record rather than a conversation.
+    review_note: str | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -176,9 +187,16 @@ class RunStartIn(BaseModel):
 
 
 class ReviewDecisionIn(BaseModel):
-    accept: bool
+    """A review decision arrives as one of three recorded acts:
+    accept, reject, or request changes. ``decision`` names the act
+    when given; ``accept`` remains for the two-act callers. A
+    request-changes decision carries its note in ``reason`` — the
+    note is required, and it is what the next plan draft sees."""
+
+    accept: bool = True
     actor: str
     reason: str | None = None
+    decision: str | None = None  # accept | reject | request_changes
 
 
 class RunActionIn(BaseModel):

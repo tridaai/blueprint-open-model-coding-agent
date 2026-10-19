@@ -42,6 +42,24 @@ reason recorded, rather than crashing the shell.
 - A human reviews a SUCCEEDED run: accept exports the .patch file,
   reject records the reason. Nothing is ever applied to the source
   repo by the agent's hand.
+- The review workbench (round 11) is folds, not state. The review
+  queue is derived on read from the stored records — orders whose
+  plans await a decision, whose runs stand SUCCEEDED awaiting
+  review, FAILED with their failure class, or INTERRUPTED awaiting
+  a recovery decision — each entry naming the one next act and its
+  age; there is no queue table and no bulk decision anywhere, by
+  construction. The review packet assembles everything a decision
+  stands on for one order — task and scope, the approved plan the
+  run ran on, the patch and its shape, the verification record
+  with its risk flags distinct, usage and priced cost, the run
+  history, and the prior decisions — and, once an order has been
+  decided on an earlier run, names what changed since that packet.
+  A third decision joins accept and reject: request changes,
+  which stores the reviewer's note on the order and returns it to
+  ``changes_requested``, a state a fresh plan version drafts from
+  with the note in its context. Reviewer history folds the
+  decision records by actor — counts by kind, the orders decided,
+  and the median time from a run's landing to its decision.
 - Runs record checkpoints as they go — one after each landed edit,
   one at each completed plan step — naming the workspace's digests,
   the tool calls so far, and the usage so far. A run that dies
@@ -106,8 +124,10 @@ reason recorded, rather than crashing the shell.
 from __future__ import annotations
 
 import shutil
+import statistics
 import time
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -1126,15 +1146,21 @@ class CodingService:
 
     def draft_plan(self, work_order_id: str, actor: str = "console") -> dict:
         order = self._require_order(work_order_id)
-        if order["status"] not in ("draft", "plan_rejected"):
+        if order["status"] not in ("draft", "plan_rejected", "changes_requested"):
             raise GateError(
                 "plan_not_draftable",
-                f"a plan can only be drafted from draft/plan_rejected, "
+                f"a plan can only be drafted from "
+                f"draft/plan_rejected/changes_requested, "
                 f"not {order['status']}",
             )
         repo_files = self._repo_files(order)
         model = self._make_model()
         plan_input = dict(order)
+        # Round 11: when a reviewer sent this order back, their note
+        # rides into the draft's context under its own key — the
+        # planner, scripted or live, is shown what the reviewer
+        # asked to change, as part of the order it plans against.
+        plan_input["_review_note"] = order.get("review_note")
         gold = self.gold.get(order["gold_task_id"]) if order.get("gold_task_id") else None
         if gold is not None:
             plan_input["_plan_approach"] = gold.plan_approach
@@ -2294,10 +2320,42 @@ class CodingService:
 
     # -- review gate -----------------------------------------------------------
     def decide_review(
-        self, work_order_id: str, *, accept: bool, actor: str, reason: str | None = None
+        self,
+        work_order_id: str,
+        *,
+        accept: bool | None = None,
+        actor: str,
+        reason: str | None = None,
+        decision: str | None = None,
     ) -> dict:
+        """Decide a review, as a recorded act. Three decisions stand
+        on a verified run: **accept** exports the patch and closes
+        the order; **reject** closes it the other way, with the
+        reason recorded; **request changes** (round 11) sends the
+        order back — the reviewer's note is stored on the order and
+        the order returns to ``changes_requested``, from which a new
+        plan version is drafted with the note in its context.
+
+        Accept and reject stand only on an order standing
+        ``succeeded`` — the decision that has not been taken yet.
+        Request changes stands on the run itself: it is available
+        wherever a SUCCEEDED run stands unaccepted — on a
+        ``succeeded`` order, and on a ``rejected`` one, where it is
+        the recorded way a reviewer reverses a rejection into a
+        send-back — and it refuses by name where no succeeded run
+        exists to send back. A request without a note refuses: the
+        note is the decision's content, and a silent send-back would
+        leave the next plan drafting against nothing."""
         order = self._require_order(work_order_id)
         run = self.store.latest_run(work_order_id)
+        if decision is None:
+            decision = "accept" if accept else "reject"
+        if decision not in ("accept", "reject", "request_changes"):
+            raise GateError(
+                "unknown_review_decision",
+                f"a review decision is accept, reject, or "
+                f"request_changes, not {decision!r}",
+            )
         if run is not None and run["status"] == "abandoned":
             # A partial patch is evidence for the humans, never a
             # submittable patch: the review gate takes SUCCEEDED
@@ -2308,13 +2366,42 @@ class CodingService:
                 f"cannot be reviewed or accepted — only a SUCCEEDED "
                 f"run reaches the review gate",
             )
+        if decision == "request_changes":
+            if (
+                run is None
+                or run["status"] != "succeeded"
+                or order["status"] not in ("succeeded", "rejected")
+            ):
+                raise GateError(
+                    "no_succeeded_run_to_return",
+                    f"work order {work_order_id} has no succeeded run "
+                    f"to send back with changes requested (status "
+                    f"{order['status']})",
+                )
+            note = (reason or "").strip()
+            if not note:
+                raise GateError(
+                    "changes_note_required",
+                    "requesting changes requires the reviewer's note: "
+                    "the note is stored on the order and shown to the "
+                    "next plan draft — a send-back without it decides "
+                    "nothing the planner can act on",
+                )
+            order["review_note"] = note
+            self._set_status(order, "changes_requested")
+            self._audit(
+                "work_order", work_order_id, "review_changes_requested",
+                actor, run_id=run["run_id"], note=note,
+            )
+            log_event("review_changes_requested", work_order_id=work_order_id)
+            return self.store.get_work_order(work_order_id)
         if order["status"] != "succeeded" or run is None:
             raise GateError(
                 "no_verified_run_awaiting_review",
                 f"work order {work_order_id} has no verified run awaiting "
                 f"review (status {order['status']})",
             )
-        if accept:
+        if decision == "accept":
             artifact = self.settings.artifacts_dir / f"{work_order_id}.patch"
             artifact.write_text(run["patch"])
             self._set_status(order, "accepted")
@@ -2332,6 +2419,372 @@ class CodingService:
             log_event("review_rejected", work_order_id=work_order_id)
         return self.store.get_work_order(work_order_id)
 
+    # -- the review workbench (round 11) --------------------------------------
+    #
+    # Everything in this section is a fold over stored records,
+    # computed on read: the queue, the packet, and reviewer history
+    # write nothing and cache nothing. A decision is an audit record
+    # (review_accepted / review_rejected / review_changes_requested,
+    # with the run it decided on in its detail); the folds below are
+    # the only readers that give those records their workbench shape.
+
+    _REVIEW_EVENTS = {
+        "review_accepted": "accepted",
+        "review_rejected": "rejected",
+        "review_changes_requested": "changes_requested",
+    }
+
+    def _review_decisions(self, work_order_id: str) -> list[dict]:
+        """The order's review decisions, folded from its audit
+        records in the order they were taken."""
+        decisions = []
+        for row in self.store.list_audit("work_order", work_order_id):
+            kind = self._REVIEW_EVENTS.get(row["event"])
+            if kind is None:
+                continue
+            detail = row.get("detail") or {}
+            decisions.append(
+                {
+                    "kind": kind,
+                    "actor": row["actor"],
+                    "at": row["created_at"],
+                    "run_id": detail.get("run_id"),
+                    "reason": detail.get("reason"),
+                    "note": detail.get("note"),
+                }
+            )
+        return decisions
+
+    @staticmethod
+    def _run_failure_class(run: dict) -> tuple[str, str]:
+        """A failed or interrupted run's class and its detail, read
+        off the run record: the same facts the benchmark folds into
+        its failure classes, named for the queue."""
+        verification = run.get("verification") or {}
+        reason = verification.get("reason") or ""
+        if run["status"] == "interrupted":
+            detail = run.get("interruption_reason") or ""
+            if run.get("budget_stop"):
+                return "budget_exhausted", detail
+            return "run_interrupted", detail
+        if verification.get("out_of_scope"):
+            return "out_of_scope_edit", reason
+        if "hidden_grading_failed" in reason or (
+            verification.get("visible_verdict") == "pass"
+            and verification.get("hidden_verdict") == "fail"
+        ):
+            return "hidden_grading_failed", reason
+        if verification.get("test_surface_touched"):
+            return "test_surface_touched", reason
+        if verification.get("unplanned_files"):
+            return "unplanned_files", reason
+        if (verification.get("patch_shape") or {}).get("whitespace_only"):
+            return "no_substantive_change", reason
+        if verification:
+            return "verification_failed", reason
+        return "run_failed", run.get("failure_reason") or ""
+
+    def review_queue(self, *, now: str | None = None) -> dict:
+        """The reviewers' queue, derived on read from the stored
+        records: every order standing where a person must act —
+        a plan awaiting its decision, a verified run awaiting
+        review, a failed run, an interrupted run awaiting its
+        recovery decision. Each entry names the order, its state,
+        the single next act that moves it, the acts open beside it,
+        and its age — the time since the order entered its current
+        state (its record's last update), which is the moment the
+        act became available. Longest-waiting first. There is no
+        queue table behind this and no bulk decision anywhere: a
+        decision is one act, on one order, by one named actor."""
+        moment = _parse_ts(now) if now else datetime.now(timezone.utc)
+        entries: list[dict] = []
+        for order in self.store.list_work_orders():
+            status = order["status"]
+            wid = order["work_order_id"]
+            run = self.store.latest_run(wid)
+            entry: dict | None = None
+            if status == "plan_ready":
+                plan = self.store.get_plan(wid)
+                entry = {
+                    "category": "plan_awaiting_approval",
+                    "next_act": "decide_plan",
+                    "available_acts": ["decide_plan"],
+                    "plan_version": plan["version"] if plan else None,
+                }
+            elif status == "succeeded" and run is not None:
+                verification = run.get("verification") or {}
+                entry = {
+                    "category": "awaiting_review",
+                    "next_act": "review",
+                    "available_acts": ["review"],
+                    "run_id": run["run_id"],
+                    "plan_version": run["plan_version"],
+                    "changed_files": list(run.get("changed_files") or []),
+                    "risk_flags": {
+                        "test_surface_touched": bool(
+                            verification.get("test_surface_touched")
+                        ),
+                        "unplanned_files": list(
+                            verification.get("unplanned_files") or []
+                        ),
+                        "hidden_verdict": verification.get("hidden_verdict"),
+                    },
+                }
+            elif status == "failed" and run is not None:
+                failure_class, detail = self._run_failure_class(run)
+                entry = {
+                    "category": "run_failed",
+                    "next_act": "restart_run",
+                    "available_acts": ["restart_run", "abandon_run"],
+                    "run_id": run["run_id"],
+                    "failure_class": failure_class,
+                    "failure_detail": detail,
+                }
+            elif status == "interrupted" and run is not None:
+                failure_class, detail = self._run_failure_class(run)
+                entry = {
+                    "category": "run_interrupted",
+                    "next_act": "resume_run",
+                    "available_acts": [
+                        "resume_run",
+                        "restart_run",
+                        "abandon_run",
+                    ],
+                    "run_id": run["run_id"],
+                    "failure_class": failure_class,
+                    "failure_detail": detail,
+                    "last_checkpoint": run.get("last_checkpoint"),
+                }
+            if entry is None:
+                continue
+            updated = _parse_ts(order.get("updated_at"))
+            entry.update(
+                {
+                    "work_order_id": wid,
+                    "title": order["title"],
+                    "status": status,
+                    "since": order.get("updated_at"),
+                    "age_seconds": (
+                        max(0, int((moment - updated).total_seconds()))
+                        if updated is not None
+                        else None
+                    ),
+                }
+            )
+            entries.append(entry)
+        entries.sort(key=lambda e: (e["since"] or "", e["work_order_id"]))
+        return {"entries": entries, "count": len(entries)}
+
+    def review_packet(self, work_order_id: str) -> dict | None:
+        """Everything a reviewer decides from, assembled for one
+        order: the task and its scope; the approved plan the latest
+        run ran on, with its fingerprint state; the patch and its
+        shape; the verification record, with the risk flags lifted
+        out and named distinctly — test surface touched, files no
+        plan step named, and the hidden verdict (``absent`` for an
+        ad-hoc order, which has no hidden set: the flag says so
+        rather than letting a missing verdict read as a pass);
+        the run's usage and priced cost; the order's run history;
+        and its prior review decisions. Once a decision stands on
+        an earlier run, the packet also names what changed since
+        that packet: the plan version, the patch's files (added
+        and removed), and the verdicts, then and now."""
+        order = self.store.get_work_order(work_order_id)
+        if order is None:
+            return None
+        runs = [self._attach_usage(r) for r in self.store.list_runs(work_order_id)]
+        run = runs[-1] if runs else None
+        decisions = self._review_decisions(work_order_id)
+        plan = None
+        if run is not None:
+            stored = self.store.get_plan(work_order_id, run["plan_version"])
+            if stored is not None:
+                plan = self._with_fingerprint_state(order, stored)
+        if plan is None:
+            latest = self.store.get_plan(work_order_id)
+            if latest is not None:
+                plan = self._with_fingerprint_state(order, latest)
+        verification = (run or {}).get("verification") or {}
+        hidden = verification.get("hidden_verdict")
+        packet: dict = {
+            "work_order": order,
+            "task": {
+                "title": order["title"],
+                "task_text": order["task_text"],
+                "file_scope": list(order["file_scope"]),
+                "gold_task_id": order.get("gold_task_id"),
+                "grading_tests": list(order.get("grading_tests") or []),
+            },
+            "plan": plan,
+            "run": run,
+            "patch": (run or {}).get("patch") or "",
+            "patch_shape": verification.get("patch_shape"),
+            "verification": verification,
+            "risk_flags": {
+                "test_surface_touched": bool(
+                    verification.get("test_surface_touched")
+                ),
+                "test_surface_files": list(
+                    verification.get("test_surface_files") or []
+                ),
+                "unplanned_files": list(
+                    verification.get("unplanned_files") or []
+                ),
+                "visible_verdict": verification.get("visible_verdict"),
+                "hidden_verdict": hidden,
+                "hidden_verdict_absent": hidden in (None, "not_applicable"),
+            },
+            "usage": (run or {}).get("usage") or [],
+            "usage_totals": (run or {}).get("usage_totals"),
+            "cost": (run or {}).get("cost") or {},
+            "run_history": [
+                {
+                    "run_id": r["run_id"],
+                    "status": r["status"],
+                    "plan_version": r["plan_version"],
+                    "model_profile": r["model_profile"],
+                    "changed_files": list(r.get("changed_files") or []),
+                    "failure_reason": r.get("failure_reason"),
+                    "interruption_reason": r.get("interruption_reason"),
+                    "budget_stop": r.get("budget_stop"),
+                    "created_at": r.get("created_at"),
+                    "finished_at": r.get("finished_at"),
+                }
+                for r in runs
+            ],
+            "review_decisions": decisions,
+            "changes_since_previous": self._packet_changes(
+                runs, run, decisions
+            ),
+        }
+        return packet
+
+    @staticmethod
+    def _packet_changes(
+        runs: list[dict], run: dict | None, decisions: list[dict]
+    ) -> dict | None:
+        """What changed between the packet a reviewer last decided
+        on and this one — computed only when a decision stands on
+        an earlier run than the latest. The comparison is between
+        run records: the plan version each ran on, the files each
+        patch changed, and each verification's verdicts."""
+        if run is None or not decisions:
+            return None
+        previous_ids = [
+            d["run_id"] for d in decisions if d["run_id"] != run["run_id"]
+        ]
+        if not previous_ids:
+            return None
+        previous = next(
+            (r for r in runs if r["run_id"] == previous_ids[-1]), None
+        )
+        if previous is None:
+            return None
+        before_v = previous.get("verification") or {}
+        now_v = run.get("verification") or {}
+        before_files = set(previous.get("changed_files") or [])
+        now_files = set(run.get("changed_files") or [])
+        return {
+            "previous_run_id": previous["run_id"],
+            "plan_version": {
+                "before": previous["plan_version"],
+                "now": run["plan_version"],
+            },
+            "patch_files": {
+                "added": sorted(now_files - before_files),
+                "removed": sorted(before_files - now_files),
+                "unchanged": sorted(before_files & now_files),
+            },
+            "verdicts": {
+                "passed": {
+                    "before": before_v.get("passed"),
+                    "now": now_v.get("passed"),
+                },
+                "visible": {
+                    "before": before_v.get("visible_verdict"),
+                    "now": now_v.get("visible_verdict"),
+                },
+                "hidden": {
+                    "before": before_v.get("hidden_verdict"),
+                    "now": now_v.get("hidden_verdict"),
+                },
+            },
+        }
+
+    def reviewer_history(self) -> dict:
+        """Per-reviewer history, folded from the decision records:
+        for each actor, their decisions counted by kind, the work
+        orders they decided (in decision order), and the median
+        time-to-decision. The derivation of the timing: a decision's
+        audit timestamp minus the landing of the run it decided —
+        the run record's ``finished_at`` (falling back to its
+        ``created_at``); a decision whose run cannot be read, or
+        whose landing cannot be parsed, counts in the tallies but
+        not in the timing. No tracking table stands behind this:
+        the audit records are the history, folded on read."""
+        rows = self.store.list_audit_events(list(self._REVIEW_EVENTS))
+        by_actor: dict[str, dict] = {}
+        for row in rows:
+            kind = self._REVIEW_EVENTS[row["event"]]
+            entry = by_actor.setdefault(
+                row["actor"],
+                {
+                    "actor": row["actor"],
+                    "decisions": 0,
+                    "accepted": 0,
+                    "rejected": 0,
+                    "changes_requested": 0,
+                    "work_orders": [],
+                    "history": [],
+                    "_durations": [],
+                },
+            )
+            entry["decisions"] += 1
+            entry[kind] += 1
+            wid = row["entity_id"]
+            if wid not in entry["work_orders"]:
+                entry["work_orders"].append(wid)
+            detail = row.get("detail") or {}
+            run_id = detail.get("run_id")
+            entry["history"].append(
+                {
+                    "work_order_id": wid,
+                    "kind": kind,
+                    "at": row["created_at"],
+                    "run_id": run_id,
+                }
+            )
+            decided_at = _parse_ts(row["created_at"])
+            run = self.store.get_run(run_id) if run_id else None
+            landed_at = (
+                _parse_ts(run.get("finished_at") or run.get("created_at"))
+                if run
+                else None
+            )
+            if decided_at is not None and landed_at is not None:
+                entry["_durations"].append(
+                    (decided_at - landed_at).total_seconds()
+                )
+        reviewers = []
+        for entry in by_actor.values():
+            durations = entry.pop("_durations")
+            entry["median_time_to_decision_seconds"] = (
+                statistics.median(durations) if durations else None
+            )
+            entry["timed_decisions"] = len(durations)
+            reviewers.append(entry)
+        reviewers.sort(key=lambda e: e["actor"])
+        return {
+            "reviewers": reviewers,
+            "derivation": (
+                "folded on read from the review decision audit "
+                "records; time-to-decision is the decision's "
+                "timestamp minus the decided run's finished_at "
+                "(created_at as fallback), per decision, and the "
+                "median is taken over an actor's timed decisions"
+            ),
+        }
+
     # -- internals -------------------------------------------------------------
     def _require_order(self, work_order_id: str) -> dict:
         order = self.store.get_work_order(work_order_id)
@@ -2343,6 +2796,19 @@ class CodingService:
         order["status"] = status
         order["updated_at"] = utcnow()
         self.store.put_work_order(order)
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    """Parse a stored ISO timestamp; an absent or unparseable one
+    reads as None, never as an exception — the workbench folds
+    tolerate records older than the fields they read."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _summarise_args(step: Step) -> dict:
