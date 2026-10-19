@@ -1,8 +1,8 @@
 """Eval gate: the gold task suite, graded end to end.
 
-Three layers on the offline model (the labelled scripted model),
-plus a fourth — the live path's code — driven through a fake
-transport replaying recorded-shape responses (no network, no key):
+Layers on the offline model (the labelled scripted model), plus
+the live path's code driven through a fake transport replaying
+recorded-shape responses (no network, no key):
 
 1. CONSTRUCTION — the suite is gold-by-construction: scripted-edit
    anchors occur exactly once in each broken file, and applying the
@@ -15,6 +15,11 @@ transport replaying recorded-shape responses (no network, no key):
    plan, a gate check (execution before approval must refuse), plan
    approval, the sandboxed run, verification on a pristine copy, and
    review acceptance exporting the .patch artifact.
+4. PLAN DEPTH (round 3) — a staleness leg (drift inside an approved
+   plan's scope refuses the run as stale_plan; a fresh plan runs)
+   and an amendment leg (the new version carries its diff, the old
+   approval does not carry, the amended plan runs on its own
+   approval).
 
 Zero-tolerance counters: edits that landed outside the approved
 scope, and runs marked SUCCEEDED without a passing verification.

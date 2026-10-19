@@ -95,9 +95,19 @@ make serve       # API + console on http://localhost:8000
 1. **Work orders.** A task arrives as a stored record: the task text,
    the target repo, and an approved **file scope**. Gold tasks
    materialise their target from the bundled workshop codebase.
-2. **Plan gate.** The model drafts a plan — approach, files, tests.
-   A human approves or rejects it as a recorded act. Execution from
-   an unapproved plan is refused in code (`plan_not_approved`).
+2. **Plan gate.** The model drafts a plan — an approach and the work
+   as an ordered list of steps, each with its intent, its files, and
+   the tests it expects to run. A human approves or rejects it as a
+   recorded act. Execution from an unapproved plan is refused in
+   code (`plan_not_approved`). Approval also records a **scope
+   fingerprint** — a hash over the task and the contents of every
+   in-scope file — and execution recomputes it first: if the repo
+   moved inside the approved scope, the run refuses as
+   `stale_plan` and a fresh plan is drafted against the repo as it
+   stands. An approved plan can be **amended** before it runs: the
+   amendment is a new version with a recorded diff, it cannot widen
+   past the work order's scope, and it needs its own approval — the
+   old one does not carry.
 3. **Sandboxed execution.** Each run copies the target into an
    isolated workspace. The model's tools are list / read / search /
    anchored edit / run-tests, behind a port that enforces the scope
@@ -119,7 +129,7 @@ make serve       # API + console on http://localhost:8000
 
 ## The gold suite (v1)
 
-Five tasks, gold-by-construction: each ships a broken state of the
+Six tasks, gold-by-construction: each ships a broken state of the
 workshop codebase and grading tests that fail on it and pass on the
 reference fix.
 
@@ -130,11 +140,13 @@ reference fix.
 | The low-stock report always comes back empty | missing feature | `workshop/inventory.py` |
 | Cancelling an order never releases its stock | bug fix | `workshop/orders.py` |
 | Ten-unit orders miss the bulk discount | boundary fix | `workshop/pricing.py` |
+| Orders cannot take a coupon | feature, two files | `workshop/pricing.py`, `workshop/orders.py` |
 
-`make evals` grades all five end to end through the service, plus
-the construction proof and a gate check per task. Zero-tolerance
-counters: edits landed outside scope, and successes without a passing
-verification.
+`make evals` grades all six end to end through the service, plus
+the construction proof, a gate check per task, and legs for the
+live adapter's code path, plan staleness, and plan amendments.
+Zero-tolerance counters: edits landed outside scope, and successes
+without a passing verification.
 
 ## Layout
 
@@ -154,8 +166,8 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–2 are built and gated: **43 tests passing, evals PASS**
-(5/5 gold tasks verified end to end on the offline model, plus one
+Rounds 1–3 are built and gated: **61 tests passing, evals PASS**
+(6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path;
 counters at zero). The live adapter is exercised in tests and evals
 through a fake transport replaying recorded-shape responses — it
@@ -163,7 +175,7 @@ has **not yet been run against the real Baseten endpoint**, which
 needs a `BASETEN_API_KEY`; the first live smoke is a deployment
 step, and this status will say so until it has happened. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: plan depth and staleness (round 3), budgets
+`docs/architecture.md`: tool depth (round 4), budgets
 and the priced cost ledger (round 6), the model promotion gate
 (round 7), and the shortlist comparison (round 8). The Postgres
 profile is code-complete behind the store port (SQLite is the local

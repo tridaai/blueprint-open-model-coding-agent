@@ -42,11 +42,18 @@ in code rather than prompted, and where the rounds go from here.
   model (the default for tests and the demo) and the live Baseten
   adapter implement the same port; nothing in the shell knows which
   model is serving. Every draft, from either, passes the port's one
-  validator (`validate_plan_draft`: approach present, files named
-  and inside the work order's approved scope) — a live model's plan
-  is refused by exactly the code that checks the scripted one's.
+  validator (`validate_plan_draft`: the plan's steps are structured
+  — intent, in-scope files, resolvable tests; see "Plans, precisely"
+  below) — a live model's plan is refused by exactly the code that
+  checks the scripted one's.
   The port also carries usage accounting: implementations note each
   call's usage and the service drains and stores it (below).
+- **`plans.py` — plan arithmetic.** Pure computations the gate
+  leans on: per-file SHA-256 digests of a plan's approved scope and
+  the fingerprint over them, drift between two digest maps, and the
+  diff between two plan versions (steps added, removed, changed;
+  scope movement). No state, no I/O beyond the target files the
+  service names.
 - **`baseten.py` — the live adapter.** OpenAI Chat Completions over
   the profile's endpoint, the key sent as the OpenAI SDK sends it.
   It translates both ways: the shell's tool schemas become function
@@ -119,12 +126,58 @@ in code rather than prompted, and where the rounds go from here.
 Work order: `draft → plan_ready → approved → running → succeeded →
 accepted`, with `plan_rejected` (re-draftable), `failed` (the run's
 verification did not pass), and `rejected` (at review) as the other
-exits. The transitions are the gates:
+exits. Two round-3 transitions bend the line without breaking it:
+`approved → plan_ready` when a plan amendment lands (the new version
+awaits its own decision), and `approved → draft` when execution
+refuses a stale plan (a fresh plan must be drafted). The transitions
+are the gates:
 
 - `start_run` requires status `approved` *and* an approved plan
-  record; anything else is `plan_not_approved`.
+  record; anything else is `plan_not_approved`. Naming a superseded
+  plan version is `plan_superseded`; naming one that does not exist
+  is `unknown_plan_version`.
 - `decide_review` requires status `succeeded`; accepting exports the
   patch from the run record to the artifacts directory.
+
+## Plans, precisely
+
+A plan is a stored, versioned artifact whose content is an
+**ordered list of steps**. Each step names its intent in words, the
+files it will touch, and the tests it expects to run. The plan's
+flat `files`/`tests` lists are derived from the steps — the unions,
+in step order — and are what the sandbox scope and verification
+check against. Validation is one function for every draft, from
+either model, and it checks structure, not vibes: at least one
+step; every step has an intent and at least one file; every named
+file is inside the work order's approved scope; and every named
+test **resolves** — to a file that exists in the target repo, or to
+the task's grading set (a gold task's grading file, or an ad-hoc
+order's named grading tests). A draft that fails is `malformed_plan`.
+
+**Approval binds the version to the world.** Deciding a plan
+approved records its *scope fingerprint*: a hash over the task
+text, the scope list, and a SHA-256 digest of every in-scope file
+in the target repo, plus the digests themselves. Before a run
+starts, the fingerprint is recomputed; any drift in an in-scope
+file — edited or deleted — refuses the run as `stale_plan`, names
+the drifted files on the audit trail (`stale_plan_refused`), and
+returns the order to `draft` for a fresh plan. Files outside the
+approved scope are never digested: they cannot stale a plan,
+because the scope is what was approved.
+
+**Amendments are new versions.** Amending an approved plan (only
+possible before execution starts) writes version n+1 with a full
+replacement step list and a stored diff against its predecessor —
+steps added, removed, and changed, and how the derived scope
+moved. The work order's scope is the amendment's ceiling: naming a
+file outside it refuses as `scope_widening_refused`; narrowing is
+fine. The new version starts undecided and the order returns to
+`plan_ready`: **an approval recorded against v(n) never authorises
+v(n+1)**. Execution always runs the latest approved version; a
+re-draft after rejection is likewise a new version, never an
+overwrite. Plan reads show every version with its steps, its
+decision, and its fingerprint state — `unrecorded`, `current`, or
+`stale`.
 
 ## Verification, precisely
 
@@ -152,8 +205,8 @@ round 7.
 
 ## The round map
 
-R1 core (this round) · R2 Baseten live path + profiles v1 · R3 plan
-depth + staleness · R4 tool depth · R5 failure recovery · R6 budgets
+R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
+staleness (this round) · R4 tool depth · R5 failure recovery · R6 budgets
 + cost ledger · R7 model promotion gate · R8 shortlist comparison ·
 R9 injection red team · R10 verification depth · R11 review
 workbench · R12 task library · R13 challenge pass · R14 batch work
@@ -162,7 +215,7 @@ surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
 prod smoke).
 
-## Honest limits (round 2)
+## Honest limits (round 3)
 
 - The live Baseten adapter is built to Baseten's documented
   OpenAI-compatible shape and is exercised end to end in tests and

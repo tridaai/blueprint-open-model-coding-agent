@@ -10,7 +10,11 @@ reason recorded, rather than crashing the shell.
 - A work order is a stored record with a state machine. Nothing runs
   without a plan, and nothing runs from an unapproved plan —
   :meth:`start_run` refuses with a GateError unless the latest plan is
-  approved.
+  approved. A plan is a versioned step list; approval records the
+  scope fingerprint execution is checked against (drift is
+  `stale_plan`), and an amendment is a new version with a recorded
+  diff whose approval never carries from the version it supersedes
+  (`plan_superseded`).
 - A run works on an isolated copy of the target repo. The model's
   steps pass through the tool port, where scope and command allowlists
   are enforced in code. Every tool call is an audit record.
