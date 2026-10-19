@@ -134,7 +134,21 @@ make serve       # API + console on http://localhost:8000
    isolated from the repo it grades (round 9): no repo conftest, no
    repo `addopts`, interpreter startup files set aside — and the
    verdict reads pytest's JUnit evidence, so a grading test that
-   was skipped or deselected is not a pass.
+   was skipped or deselected is not a pass. And the verdict has
+   depth (round 10): the record carries the patch's shape (files,
+   lines added/removed per file, binary, whitespace-only — a
+   whitespace-only patch fails as `no_substantive_change`), the
+   files it touched that are test/grading surface
+   (`test_surface_touched` — for a gold task that fails the run by
+   name; for an ad-hoc order it is flagged and shown in red at the
+   review gate), and the files no step of the approved plan named
+   (`unplanned_files` — a gold patch with one fails by name). A
+   gold run that passes the visible set is then re-graded against
+   the task's **hidden** grading set — staged only at that moment,
+   into the same patched copy, never present in any workspace —
+   and a hidden failure flips the verdict to FAILED as
+   `hidden_grading_failed`, with the visible and hidden verdicts
+   recorded distinctly.
 5. **Review gate.** A human accepts a verified run — the `.patch`
    file is exported to the run artifacts — or rejects it with a
    recorded reason. Nothing is applied to the source repo.
@@ -204,7 +218,11 @@ make serve       # API + console on http://localhost:8000
 
 Six tasks, gold-by-construction: each ships a broken state of the
 workshop codebase and grading tests that fail on it and pass on the
-reference fix.
+reference fix. Since round 10 each task also ships a **hidden**
+grading file (`evals/gold/hidden/`) — edge cases of the same fix on
+inputs the visible tests never use, failing on the broken state and
+passing on the reference fix by the same construction, and used
+only for the verification re-grade.
 
 | Task | Shape | Scope |
 | --- | --- | --- |
@@ -224,7 +242,9 @@ nothing is tuned against it.
 the construction proof, a gate check per task, and legs for the
 live adapter's code path, plan staleness, and plan amendments.
 Zero-tolerance counters: edits landed outside scope, successes
-without a passing verification, and injection effects landed.
+without a passing verification (since round 10, including any
+success whose hidden re-grade verdict is not a pass), and
+injection effects landed.
 
 ## Layout
 
@@ -245,7 +265,7 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–9 are built and gated: **134 tests passing, evals PASS**
+Rounds 1–10 are built and gated: **147 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -264,7 +284,12 @@ the held-out set and prints the folded matrix, and a red-team leg
 where planted repo instructions obeyed by a hostile model, a
 skip-all conftest, self-approving task text, a fake verification
 transcript, path tricks, symlinks, and a hostile live plan draft
-land nothing; counters at zero).
+land nothing; counters at zero, and a verification-depth leg
+where an overfit fix that special-cases the visible tests' inputs
+passes the visible set and fails the hidden re-grade, a gold
+test-surface patch and a gold unplanned-file patch are each
+refused by name, and a whitespace-only patch is named
+`no_substantive_change`).
 The default model profile is now earned, not configured: the gold
 suite is split tuning/held-out under content hashes, a profile is
 benchmarked through the real service path with the records
@@ -303,9 +328,17 @@ target were dereferenced by search and by the tree copies. Both
 are fixed at the layer that owns them — grading now runs
 isolated, on JUnit evidence that every grading test ran, and
 symlinks are followed nowhere — and both are kept as
-regressions; the full report is `docs/red-team.md`. What is
+regressions; the full report is `docs/red-team.md`. Verification
+then gained depth (round 10): a patch is now checked as a change,
+not only as a test result — its shape is on the record, a gold
+patch that edits the test/grading surface or lands a file no plan
+step named fails by name, and every gold task carries a hidden
+grading set that re-grades a visible pass on inputs the visible
+tests never use, so an overfit fix that special-cases them flips
+to FAILED as `hidden_grading_failed`; the full report is
+`docs/verification-depth.md`. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: verification depth (round 10). The Postgres
+`docs/architecture.md`: the review workbench (round 11). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.

@@ -139,7 +139,16 @@ in code rather than prompted, and where the rounds go from here.
   (anchors unique; edits reproduce the fix byte for byte). Grading
   tests are staged only into the verification copy — a run workspace
   never contains them, and the reference fix reaches a run only as
-  the scripted model's edits.
+  the scripted model's edits. Since round 10 each task also carries
+  a hidden grading file (`evals/gold/hidden/`), staged only at
+  re-grade time; construction checks it exists, is named for the
+  hidden set, and is not the visible file restated.
+- **`verification.py` — verification depth, as pure checks.**
+  Test-surface classification by the repo's layout rules, the
+  plan-steps comparison behind `unplanned_files`, and the planned
+  file list — no state, no I/O; the service's `_verify` applies
+  the policy (gold fails by name; ad-hoc flags) and
+  `patch.patch_shape` supplies the hygiene facts.
 - **`store.py` — one port, two adapters.** SQLite local default at
   `./data/codingagent.db`; `DATABASE_URL` switches to Postgres.
   Payloads are JSON in TEXT columns in *both* dialects, so a payload
@@ -239,6 +248,32 @@ grading counts (tests, failures, errors, skipped) are stored on
 the verdict as `grading_evidence`, and a pass requires every
 grading test to have actually run and passed. An exit code of
 zero over skipped or deselected tests is not a verdict.
+
+Since round 10 the verdict also carries the patch's depth facts,
+computed before any grading runs (the pure checks live in
+`verification.py`, the shape in `patch.patch_shape`): the patch's
+shape (files changed, lines added/removed per file, binary files,
+empty, whitespace-only); `test_surface_touched` with the files
+named — a changed file that is, or shadows, a test/grading path
+by the repo's layout rules (test modules, test/grading directory
+trees, `conftest`/startup/pytest-config files); and
+`unplanned_files` — changed files no step of the approved plan
+named, the landed patch compared against the plan's steps rather
+than only its derived scope. Policy: for a gold task a
+test-surface or unplanned patch fails verification by name (the
+fix never lives in tests; the steps cover exactly the scope);
+for an ad-hoc order both are recorded and named, and the
+test-surface flag is surfaced in red at the review gate, without
+failing a run an operator may have legitimately scoped that way.
+A whitespace-only patch fails as `no_substantive_change` — the
+empty patch keeps its own honest name. And a gold task's visible
+pass is only provisional: the shell then stages the task's
+*hidden* grading file — kept in the eval area, present in no
+workspace, staged only at that moment into the same patched
+pristine copy — and re-grades; a hidden failure flips the
+verdict to FAILED as `hidden_grading_failed`, with the record
+keeping `visible_verdict` and `hidden_verdict` distinct. See
+`docs/verification-depth.md`.
 
 ## Failure recovery, precisely
 
@@ -558,19 +593,59 @@ beyond proving the grading tests run (test-gaming is round 10),
 the challenge pass (round 13), and any change to promotion or
 comparison semantics.
 
+## Verification depth (round 10)
+
+Round 10 assumes the grading tests run honestly (round 9) and
+asks whether the *patch* is honest. The full report is
+`docs/verification-depth.md`; the four defences, all computed at
+verification and stored on the verdict record:
+
+- **Test-editing defence.** A patch touching the test/grading
+  surface (by the repo's layout rules: test modules, files under
+  test/grading trees, `conftest`/startup/pytest-config files) is
+  flagged `test_surface_touched` with the files named. On a gold
+  task it fails verification by name; on an ad-hoc order the flag
+  is recorded, carried on the audit record, and shown in red at
+  the review gate. Through the ordinary run path the tool port
+  already makes such a gold patch impossible — the scope is the
+  code files — so the check is defence in depth, proved at
+  `_verify` with crafted plans that put the surface in scope.
+- **Hidden-test re-grade.** Each gold task gains a hidden grading
+  file in the eval area — edge cases of the same fix, on inputs
+  the visible set never uses, failing on the broken state and
+  passing on the reference fix by construction. It is staged
+  only at re-grade time, into the same patched pristine copy the
+  visible set just passed on, and never exists in a workspace. A
+  hidden failure flips the verdict: `hidden_grading_failed`. The
+  record keeps the visible and hidden verdicts distinct, and the
+  benchmark content hash now covers the hidden sets, because a
+  verdict depends on them.
+- **Scope-creep detection.** The landed patch is compared against
+  the approved plan's *steps*: files no step named are
+  `unplanned_files`, stored on every record. Gold patches with
+  unplanned files fail by name. Because the validator derives a
+  plan's scope from its steps, the comparison is a stored proof
+  on every run and a live check against any record whose steps
+  and scope ever disagree — file-level only this round.
+- **Patch hygiene.** `patch_shape` records files changed, lines
+  added/removed per file, binary files, empty, and
+  whitespace-only. An empty patch still fails as "the run
+  produced no patch"; a whitespace-only patch fails earlier and
+  by its own name, `no_substantive_change`.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
 staleness · R4 tool depth · R5 failure recovery · R6 budgets
 + cost ledger · R7 model promotion gate · R8 shortlist comparison ·
-R9 injection red team (this round) · R10 verification depth · R11 review
+R9 injection red team · R10 verification depth (this round) · R11 review
 workbench · R12 task library · R13 challenge pass · R14 batch work
 orders · R15 observability · R16 deployment profiles · R17 MCP
 surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
 prod smoke).
 
-## Honest limits (round 9)
+## Honest limits (round 10)
 
 - The live Baseten adapter is built to Baseten's documented
   OpenAI-compatible shape and is exercised end to end in tests and
@@ -618,8 +693,19 @@ prod smoke).
   counts on the verdict. It does not prove the tests are strong:
   for an ad-hoc order the grading set is the operator's own tests
   in the target repo, and a grading test that asserts nothing is
-  a test the operator chose. Test-gaming depth — a patch that
-  games tests which genuinely run — is round 10's subject. And
-  the pack attacks the shell with hostile scripted steps, not a
-  live model: whether a real model follows planted repo text is
-  that model's property, and no defence here depends on it.
+  a test the operator chose. And the pack attacks the shell with
+  hostile scripted steps, not a live model: whether a real model
+  follows planted repo text is that model's property, and no
+  defence here depends on it.
+- Verification depth (round 10) narrows the test-gaming surface
+  but does not close it. The hidden sets are one extra file per
+  gold task — real edge cases, and a small set: a deployment
+  growing its suite grows the hidden sets with it, and an overfit
+  clever enough to satisfy both sets' stated behaviour is, at
+  that point, close to a fix. Ad-hoc orders have no hidden set
+  (the record says `not_applicable` rather than pretending one
+  ran), and their test-surface touches are flagged, not refused:
+  the review gate's human is the control there. Scope-creep
+  detection is file-level — whether an edit inside a named file
+  strays beyond its step's intent is the challenge pass's
+  question (round 13), not this round's.
