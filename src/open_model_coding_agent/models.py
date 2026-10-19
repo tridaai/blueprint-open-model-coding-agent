@@ -227,3 +227,14 @@ class RollbackIn(BaseModel):
 
     actor: str
     rationale: str
+
+
+class ComparisonIn(BaseModel):
+    """A shortlist comparison arrives as an act: which benchmark
+    set every profile runs over (the tuning set by default — the
+    breadth set; the held-out set may be named instead), recorded
+    by whom. The shortlist itself is not named in the request: a
+    comparison always covers every recorded profile."""
+
+    set_name: str = "tuning"
+    actor: str = "console"

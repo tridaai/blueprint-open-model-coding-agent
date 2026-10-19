@@ -63,6 +63,9 @@
   <h2>Model promotion — the default is earned</h2>
   <div id="promotion"><div class="muted">loading…</div></div>
 
+  <h2>Shortlist comparison — the evidence, side by side</h2>
+  <div id="comparisons"><div class="muted">loading…</div></div>
+
   <div id="detail"></div>
 </main>
 <footer>
@@ -186,6 +189,66 @@ async function loadPromotion() {
   }
   html += `</div>`;
   $("promotion").innerHTML = html;
+}
+
+async function loadComparisons() {
+  const reports = await api("/api/comparisons");
+  if (!reports.length) {
+    $("comparisons").innerHTML = `<div class="card"><div class="muted">No comparison
+      recorded yet. A comparison runs every recorded profile once over the same
+      benchmark set, through the benchmark path, under one actor.</div></div>`;
+    return;
+  }
+  const r = reports[reports.length - 1];
+  const money = (v) => (v === null || v === undefined) ? "—" : "$" + v;
+  const cell = (t) => {
+    if (!t.attempts) return `<span class="mid">not servable</span>`;
+    return t.verified_successes === t.attempts
+      ? `<span class="ok">✓ ${t.verified_successes}/${t.attempts}</span>`
+      : `<span class="bad">✗ ${t.verified_successes}/${t.attempts}</span>`;
+  };
+  let html = `<div class="card">
+    <div>Set: <strong>${esc(r.set_name)}</strong> · hash ${esc(r.task_set_hash.slice(0, 12))}…
+      · recorded by ${esc(r.actor)} at ${esc(r.created_at)}` +
+      (r.stale ? ` · <span class="bad">stale — the set has moved since this
+        comparison was recorded (current hash ${esc(r.current_task_set_hash.slice(0, 12))}…);
+        the record stands as recorded</span>` : ` · <span class="ok">current</span>`) +
+      `</div>
+    <div class="muted" style="margin-top:4px">${esc(r.note)}</div>
+    <table style="margin-top:10px">
+      <thead><tr><th>Profile</th>${r.tasks.map((t) => `<th>${esc(t)}</th>`).join("")}
+        <th>Successes (worst · mean)</th><th>Usage</th><th>Priced cost</th>
+        <th>Cost / successful task</th><th>Failures</th><th>Promotion standing</th></tr></thead>
+      <tbody>${r.profiles.map((p) => {
+        const failures = Object.entries(p.failure_classes || {})
+          .map(([k, v]) => `${esc(k)} ×${v}`).join(", ");
+        const standing = p.promotion
+          ? `${esc(p.promotion.evaluation_state)} evaluation` +
+            (p.promotion.is_default ? ` · <strong>incumbent default</strong>` : ``)
+          : "";
+        const costCell = p.cost.pricing === "priced"
+          ? money(p.cost.cost_per_successful_task)
+          : (p.cost.pricing === "not_servable"
+              ? `<span class="mid">not servable</span>`
+              : `<span class="mid">${esc(p.cost.pricing)} — ${(p.cost.unpriced_reasons || []).map(esc).join(", ") || "no price recorded"}</span>`);
+        return `<tr>
+          <td>${esc(p.profile_id)}<div class="muted">${esc(p.model || "offline scripted")}</div></td>
+          ${p.per_task.map((t) => `<td>${cell(t)}</td>`).join("")}
+          <td>${p.successes === null ? "—" : `${p.successes} (worst ${p.worst_successes} · mean ${p.mean_successes})`}</td>
+          <td>${p.usage.calls} calls · ${p.usage.total_tokens} tokens · ${p.usage.latency_ms} ms</td>
+          <td>${p.cost.pricing === "priced" ? money(p.cost.priced_cost) : (p.cost.pricing === "not_servable" ? "—" : `<span class="mid">${esc(p.cost.pricing)}</span>`)}</td>
+          <td>${costCell}</td>
+          <td>${failures || "—"}</td>
+          <td>${standing}</td>
+        </tr>`;
+      }).join("")}
+      </tbody></table>
+    <div class="muted" style="margin-top:6px">The matrix is folded from the stored
+      benchmark records on every read. Cost per successful task is stated only where
+      the price table prices the profile's slug; an unpriced fold is labelled, never
+      shown as zero. Default profile at read time: <strong>${esc(r.default_profile_id)}</strong>.</div>
+  </div>`;
+  $("comparisons").innerHTML = html;
 }
 
 async function createFromGold(id) {
@@ -361,7 +424,7 @@ async function decideReview(id, accept) {
     { accept, actor, reason: accept ? null : "rejected in console" }, id);
 }
 
-loadReadiness(); loadGold(); loadOrders(); loadCosts(); loadPromotion();
+loadReadiness(); loadGold(); loadOrders(); loadCosts(); loadPromotion(); loadComparisons();
 </script>
 </body>
 </html>

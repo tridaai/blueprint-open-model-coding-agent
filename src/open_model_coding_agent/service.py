@@ -77,6 +77,20 @@ reason recorded, rather than crashing the shell.
   baseline, and an actor other than the evaluation's. The default
   is the latest promotion event's target; rollback is a new event
   restoring the previous default. Nothing else can move it.
+- The shortlist comparison (round 8) runs every recorded profile
+  once over the same benchmark set through that same benchmark
+  path, under one comparison actor, and stores the comparison as
+  a record. A profile that cannot serve in this environment is
+  recorded ``not_servable`` with the refusal's reason — never
+  skipped, never faked. The report is a pure fold over the stored
+  records (the per-task matrix, usage, priced cost and cost per
+  successful task where the slug is priced, failure classes, and
+  each profile's promotion standing read from the gate's own
+  records); recomputing it changes nothing, and a comparison
+  whose set has since moved reads as stale. The report ranks
+  nothing and recommends nothing: the promotion gate remains the
+  only path that moves the default, and the comparison record
+  states that on its face.
 """
 
 from __future__ import annotations
@@ -104,6 +118,7 @@ from .models import Plan, PlanStep, Run, WorkOrder, WorkOrderIn
 from .patch import PatchError, apply_patch, build_patch
 from .plans import diff_plans, drifted_files, file_digests, scope_fingerprint
 from .prices import current_table, fold_usage, load_price_tables
+from .profiles import list_profiles
 from .store import SqlStore, utcnow
 from .tools import SandboxTools, dispatch
 
@@ -806,6 +821,142 @@ class CodingService:
 
     def list_benchmarks(self, profile_id: str | None = None) -> list[dict]:
         return self.store.list_benchmark_runs(profile_id)
+
+    # -- shortlist comparisons (round 8) ------------------------------------
+    def run_comparison(
+        self, *, set_name: str = "tuning", actor: str = "console"
+    ) -> dict:
+        """Run one shortlist comparison: EVERY recorded profile,
+        once, over the same benchmark set, through the benchmark
+        path above, all under one comparison actor — and store the
+        comparison as a record naming each profile's benchmark.
+
+        The shortlist is the profiles directory as recorded: the
+        five Baseten family profiles and the offline profile in
+        the shipped set, whatever a deployment's directory holds
+        in its place. A profile that cannot serve in this
+        environment — a live profile whose key is not set, an
+        override outside its allowlist — is recorded on the
+        comparison as ``not_servable`` with the refusal's own
+        reason: never silently skipped, and never faked with a
+        substitute's results. The comparison is evidence only —
+        producing one never moves the default; the promotion gate
+        above is the only path that does, and the record states
+        that on its face. Returns the comparison report, folded
+        from the stored records."""
+        if set_name not in BENCHMARK_SETS:
+            raise GateError(
+                "unknown_benchmark_set",
+                f"no benchmark set named {set_name!r}; the sets are "
+                f"{sorted(BENCHMARK_SETS)}",
+            )
+        self._require_sound_split()
+        from .comparisons import COMPARISON_NOTE
+
+        entries: list[dict] = []
+        for profile in list_profiles(self.settings.profiles_dir):
+            profile_id = profile.profile_id
+            try:
+                bench = self.run_benchmark(
+                    profile_id, set_name=set_name, actor=actor
+                )
+            except GateError as exc:
+                if exc.code != "profile_not_servable":
+                    raise
+                entries.append(
+                    {
+                        "profile_id": profile_id,
+                        "model": profile.model,
+                        "status": "not_servable",
+                        "benchmark_ids": [],
+                        "reason": exc.message,
+                    }
+                )
+                continue
+            entries.append(
+                {
+                    "profile_id": profile_id,
+                    "model": bench["model"],
+                    "status": "benchmarked",
+                    "benchmark_ids": [bench["benchmark_id"]],
+                    "reason": None,
+                }
+            )
+        record = {
+            "comparison_id": _new_id("cmp"),
+            "set_name": set_name,
+            "task_set_hash": task_set_hash(self.gold, set_name),
+            "tasks": list(BENCHMARK_SETS[set_name]),
+            "actor": actor,
+            "entries": entries,
+            "note": COMPARISON_NOTE,
+            "created_at": utcnow(),
+        }
+        self.store.append_comparison(record)
+        log_event(
+            "comparison_recorded",
+            comparison_id=record["comparison_id"],
+            set_name=set_name,
+            actor=actor,
+            benchmarked=sum(
+                1 for e in entries if e["status"] == "benchmarked"
+            ),
+            not_servable=sum(
+                1 for e in entries if e["status"] == "not_servable"
+            ),
+        )
+        return self._comparison_report(record)
+
+    def _comparison_report(self, record: dict) -> dict:
+        """One comparison's report: a pure fold over the stored
+        records — the comparison, the benchmarks it names, those
+        benchmarks' usage rows, and the promotion records. The
+        set's CURRENT hash is computed here, at read time, so a
+        comparison recorded before a task edit reads as stale;
+        the stored record itself is never rewritten."""
+        from .comparisons import build_report
+
+        benchmark_ids = [
+            bid
+            for entry in record["entries"]
+            for bid in entry["benchmark_ids"]
+        ]
+        stored = {b["benchmark_id"]: b for b in self.store.list_benchmark_runs()}
+        benchmarks = [stored[bid] for bid in benchmark_ids if bid in stored]
+        usage_rows: list[dict] = []
+        seen_orders: set[str] = set()
+        for bench in benchmarks:
+            for outcome in bench["outcomes"]:
+                wid = outcome.get("work_order_id")
+                if wid and wid not in seen_orders:
+                    seen_orders.add(wid)
+                    usage_rows.extend(
+                        self.store.list_usage(work_order_id=wid)
+                    )
+        return build_report(
+            record,
+            benchmarks=benchmarks,
+            usage_rows=usage_rows,
+            price_tables=self.price_tables,
+            evaluations=self.store.list_promotion_evaluations(),
+            default_profile_id=self.default_profile_id(),
+            current_set_hash=task_set_hash(self.gold, record["set_name"]),
+            held_out_hash=task_set_hash(self.gold, SET_HELD_OUT),
+        )
+
+    def get_comparison(self, comparison_id: str) -> dict | None:
+        """One comparison's report, or None — the record is read
+        fresh and folded on every call, so the report always
+        shows the promotion standing and staleness of right now."""
+        record = self.store.get_comparison(comparison_id)
+        return self._comparison_report(record) if record else None
+
+    def list_comparisons(self) -> list[dict]:
+        """Every recorded comparison, each folded into its report."""
+        return [
+            self._comparison_report(record)
+            for record in self.store.list_comparisons()
+        ]
 
     def audit(self, work_order_id: str) -> list[dict]:
         return self.store.list_audit("work_order", work_order_id)

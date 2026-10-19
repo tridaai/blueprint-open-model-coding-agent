@@ -431,6 +431,40 @@ class SqlStore:
         )
         return [json.loads(r["payload"]) for r in rows]
 
+    # -- shortlist comparisons (round 8) --------------------------------
+    def append_comparison(self, record: dict) -> None:
+        """Comparison records are append-only, like the benchmark
+        records they name: a comparison, once recorded, is the
+        evidence a report folds over — a later task-set edit marks
+        it stale on read, it never rewrites it."""
+        self._write(
+            f"INSERT INTO comparisons (comparison_id, set_name, "
+            f"task_set_hash, actor, payload, created_at) VALUES "
+            f"({self._ph}, {self._ph}, {self._ph}, {self._ph}, "
+            f"{self._ph}, {self._ph})",
+            (
+                record["comparison_id"],
+                record["set_name"],
+                record["task_set_hash"],
+                record["actor"],
+                json.dumps(record),
+                record["created_at"],
+            ),
+        )
+
+    def get_comparison(self, comparison_id: str) -> dict | None:
+        row = self._one(
+            f"SELECT payload FROM comparisons WHERE comparison_id = {self._ph}",
+            (comparison_id,),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def list_comparisons(self) -> list[dict]:
+        rows = self._all(
+            "SELECT payload FROM comparisons ORDER BY created_at, comparison_id"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
     # -- audit --------------------------------------------------------------
     def append_audit(
         self, entity: str, entity_id: str, event: str, actor: str, detail: dict

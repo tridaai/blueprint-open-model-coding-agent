@@ -20,6 +20,7 @@ from .model_port import PlanDraft, PlanStepDraft
 from .models import (
     AmendPlanIn,
     BenchmarkIn,
+    ComparisonIn,
     EvaluateIn,
     PlanDecisionIn,
     PromoteIn,
@@ -112,6 +113,28 @@ def create_app(settings=None) -> FastAPI:
     @app.post("/api/promotions/rollback")
     def rollback(body: RollbackIn):
         return service.rollback(actor=body.actor, rationale=body.rationale)
+
+    # -- shortlist comparisons (round 8) ------------------------------------
+    @app.post("/api/comparisons", status_code=201)
+    def run_comparison(body: ComparisonIn):
+        return service.run_comparison(set_name=body.set_name, actor=body.actor)
+
+    @app.get("/api/comparisons")
+    def comparisons():
+        return service.list_comparisons()
+
+    @app.get("/api/comparisons/{comparison_id}")
+    def comparison(comparison_id: str):
+        report = service.get_comparison(comparison_id)
+        if report is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "detail": f"no comparison {comparison_id!r}",
+                    "code": "unknown_comparison",
+                },
+            )
+        return report
 
     # -- gold tasks ------------------------------------------------------
     @app.get("/api/gold-tasks")
