@@ -179,12 +179,32 @@ make serve       # API + console on http://localhost:8000
    `hidden_grading_failed`, with the visible and hidden verdicts
    recorded distinctly.
 5. **Review gate.** A human accepts a verified run — the `.patch`
-   file is exported to the run artifacts — or rejects it with a
-   recorded reason. Nothing is applied to the source repo.
-6. **Audit.** Every act — work order, plan, decision, tool call,
+   file is exported to the run artifacts — rejects it with a
+   recorded reason, or **requests changes**: the reviewer's note
+   is stored on the order, which returns to a state a new plan
+   version drafts from with the note in its context. Nothing is
+   applied to the source repo.
+6. **The review workbench (round 11).** Reviewers work from a
+   **queue derived on read** from the stored records — plans
+   awaiting a decision, verified runs awaiting review, failed
+   runs with their failure class, interrupted runs awaiting a
+   recovery decision — each entry naming its single next act and
+   its age. There is no queue table and no bulk decision anywhere:
+   every decision is one recorded act on one order. For each
+   order the **review packet** assembles the whole decision in
+   one read — task and scope, the approved plan the run ran on,
+   the patch and its shape, the verification record with the
+   risk flags distinct (test surface touched, unplanned files,
+   the hidden verdict — or its named absence on an ad-hoc order),
+   usage and priced cost, the run history, and the prior
+   decisions; after a send-back, the re-review packet names what
+   changed since the previous one. **Reviewer history** folds the
+   same decision records by actor: counts by kind, the orders
+   decided, and the median time-to-decision.
+7. **Audit.** Every act — work order, plan, decision, tool call,
    refused edit, verification, review — is a stored record; a run's
    history reconstructs end to end.
-7. **Budgets and the cost ledger (round 6).** A run spends against
+8. **Budgets and the cost ledger (round 6).** A run spends against
    ceilings enforced in the shell — model calls, provider-measured
    tokens, active wall-clock seconds — snapshotted onto the run at
    start from `Policy` (`CODINGAGENT_MAX_MODEL_CALLS`,
@@ -208,7 +228,7 @@ make serve       # API + console on http://localhost:8000
    task** — all of a profile's priced spend, failures included,
    over its verified successes. The offline model's accounting is
    characters, labelled `scripted` — never priced as tokens.
-8. **The promotion gate (round 7).** The gold suite is split into
+9. **The promotion gate (round 7).** The gold suite is split into
    a **tuning** set and a **held-out** set, each named by a
    content hash over its tasks — add a task or edit a defect and
    the hash moves, and every result recorded under the old hash is
@@ -226,7 +246,7 @@ make serve       # API + console on http://localhost:8000
    rollback are append-only events, and the console shows the
    whole gate — sets and hashes, evaluations, history — beside
    the cost fold.
-9. **The shortlist comparison (round 8).** A comparison runs
+10. **The shortlist comparison (round 8).** A comparison runs
    **every** recorded profile — the five Baseten family profiles
    and the offline profile — once over the same benchmark set
    (the tuning set by default, for breadth; the set and its
@@ -297,8 +317,8 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–10 plus the live-wiring round are built and gated:
-**162 tests passing, evals PASS**
+Rounds 1–11 plus the live-wiring round are built and gated:
+**174 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -322,7 +342,12 @@ where an overfit fix that special-cases the visible tests' inputs
 passes the visible set and fails the hidden re-grade, a gold
 test-surface patch and a gold unplanned-file patch are each
 refused by name, and a whitespace-only patch is named
-`no_substantive_change`).
+`no_substantive_change`, and a workbench leg where one order is
+driven through the reviewer's whole journey on the queue and
+packet reads — rejection, a request-changes send-back against
+the stored note, a new plan and run, a re-review packet naming
+what changed, and acceptance, with the leg's decisions folded
+into reviewer history).
 The default model profile is now earned, not configured: the gold
 suite is split tuning/held-out under content hashes, a profile is
 benchmarked through the real service path with the records
@@ -346,11 +371,19 @@ figures that read stated — v1 remains on disk, and rows recorded
 under it still fold as unpriced (counted, reasoned, never zero).
 One profile the catalog does not serve stands recorded as such:
 `baseten-qwen`, not servable with its reason on the record. The live adapter is exercised in tests and evals
-through a fake transport replaying recorded-shape responses — it
-has **not yet been run against the real Baseten endpoint**;
-`tools/live_smoke.py` is the deployment check that runs it, and
-this status will say so until that run has happened and been
-recorded. The
+through a fake transport replaying recorded-shape responses —
+and it has been run against the real endpoint: on 2026-10-19
+the blueprint's own adapter ran the gold task
+`reserve-overcommit` end to end against Baseten's live Model
+APIs on `deepseek-ai/DeepSeek-V4-Flash-0731` (profile
+`baseten-deepseek`) — the model drafted the plan, took 9 tool
+steps, and produced an in-scope patch to
+`workshop/inventory.py`; verification passed on both the visible
+and the hidden grading sets; the run recorded 8 API calls and
+20,366 tokens at a total priced cost of $0.00281619 under price
+table v2 (run `run-97f7d412bd`). That is a dated
+deployment-check result, recorded once; `tools/live_smoke.py` is
+the repeatable check that re-runs it. The
 shortlist now runs side by side as a stored comparison: every
 profile over the same set through the benchmark path, the
 keyless ones recorded not_servable with their reasons, and the
@@ -375,9 +408,19 @@ step named fails by name, and every gold task carries a hidden
 grading set that re-grades a visible pass on inputs the visible
 tests never use, so an overfit fix that special-cases them flips
 to FAILED as `hidden_grading_failed`; the full report is
-`docs/verification-depth.md`. What is
+`docs/verification-depth.md`. The review workbench
+(round 11) then gave reviewers their surface: a queue folded
+from the records on every read — each waiting order naming its
+single next act and its age, with no bulk decision anywhere in
+the route table — a review packet that assembles the whole
+decision (plan, patch and shape, verdicts with the risk flags
+distinct, usage and cost, run history, prior decisions, and,
+on a re-review, what changed since the previous packet), a
+third decision — request changes — whose note is stored on the
+order and shown to the next plan draft, and reviewer history
+folded from the decision records. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: the review workbench (round 11). The Postgres
+`docs/architecture.md`: the task library (round 12). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.

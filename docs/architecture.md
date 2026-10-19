@@ -183,7 +183,11 @@ in code rather than prompted, and where the rounds go from here.
 Work order: `draft → plan_ready → approved → running → succeeded →
 accepted`, with `plan_rejected` (re-draftable), `failed` (the run's
 verification did not pass), and `rejected` (at review) as the other
-exits. Two round-3 transitions bend the line without breaking it:
+exits. Round 11 adds `changes_requested`: a review decision that
+sends a succeeded run back — from `succeeded`, or from `rejected`
+when a reviewer reverses a rejection into a send-back — to a state
+a fresh plan version drafts from, carrying the reviewer's note on
+the order (see "The review workbench"). Two round-3 transitions bend the line without breaking it:
 `approved → plan_ready` when a plan amendment lands (the new version
 awaits its own decision), and `approved → draft` when execution
 refuses a stale plan (a fresh plan must be drafted). Round 5 adds
@@ -655,16 +659,89 @@ verification and stored on the verdict record:
   produced no patch"; a whitespace-only patch fails earlier and
   by its own name, `no_substantive_change`.
 
+## The review workbench (round 11)
+
+**The queue is a derivation, not a table.** `review_queue` folds
+the stored records on read into the reviewers' queue: every order
+standing where a person must act — `plan_ready` (a plan awaiting
+its decision), `succeeded` (a verified run awaiting review, with
+the verification's risk flags riding the entry), `failed` (with
+the failure class read off the run record: hidden re-grade,
+test surface, unplanned files, budget, plain verification
+failure), and `interrupted` (with its interruption named). Each
+entry names the order, its state, the **single next act** that
+moves it (`decide_plan`, `review`, `restart_run`, `resume_run`),
+the acts open beside it where recovery offers more than one, and
+its **age** — the time since the order's record last changed,
+which is when the act became available. Longest-waiting first.
+Nothing is cached and nothing is written: an order enters and
+leaves the queue exactly when its records say so. And there is
+**no bulk decision** — the route table is the proof: every
+decision route is a POST on one work order, and the queue itself
+is a read. A decision is one act, on one order, by one named
+actor, or it is not a decision this shell records.
+
+**The packet is the decision's whole evidence, in one read.**
+`review_packet` assembles, for one order: the task text and its
+scope; the approved plan the latest run ran on (its version,
+steps, and fingerprint state — not merely the latest plan, which
+an amendment may have moved past the run); the patch and its
+round-10 shape; the verification record with the risk flags
+lifted out and named distinctly — `test_surface_touched` with
+its files, `unplanned_files`, the visible verdict, and the
+hidden verdict with an explicit `hidden_verdict_absent` flag for
+an ad-hoc order, which has no hidden set (absent says absent; it
+never reads as a pass); the run's usage rows and priced cost;
+the order's full run history (each attempt's status, plan
+version, failure or interruption); and its prior review
+decisions. A reviewer decides from the packet without opening
+another view — that is the packet's contract, and the console
+renders it with the risk flags visually distinct. Once a decision
+stands on an earlier run, the packet also carries
+`changes_since_previous`: the plan version then and now, the
+patch's files added and removed between the two runs, and the
+verdicts (overall, visible, hidden) then and now — a re-review
+starts from what changed, not from a cold read.
+
+**Request changes is a third decision.** Beside accept and
+reject, `decide_review` records `request_changes`: the reviewer's
+note is stored on the order, an audit record names the act, and
+the order returns to `changes_requested` — a state a fresh plan
+version drafts from, with the note placed in the draft's context
+(the port receives it under its own key; the live adapter puts it
+in the planning prompt, the scripted model records it in its
+accounting of what it was shown). Accept and reject stand only on
+an order standing `succeeded`. Request changes stands on the run:
+it is available wherever a SUCCEEDED run stands unaccepted —
+including on a `rejected` order, where it is the recorded way a
+reviewer reverses a rejection into a send-back rather than a
+dead end — and it refuses by name (`no_succeeded_run_to_return`)
+where no succeeded run exists to send back, and
+(`changes_note_required`) where the note is missing: the note is
+the decision's content, and a silent send-back would leave the
+next plan drafting against nothing.
+
+**Reviewer history is the same fold, by actor.** Decisions are
+audit records — actor, timestamp, the run decided on — so
+history needs no tracking table: `reviewer_history` folds them
+into per-actor counts by kind (accepted, rejected, changes
+requested), the work orders each actor decided in decision order,
+their decision list, and a **median time-to-decision**, derived
+as the decision's timestamp minus the landing of the run it
+decided (the run's `finished_at`, its `created_at` as fallback);
+a decision whose run cannot be read counts in the tallies but
+not the timing, and the read states the derivation on its face.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
 staleness · R4 tool depth · R5 failure recovery · R6 budgets
 + cost ledger · R7 model promotion gate · R8 shortlist comparison ·
 R9 injection red team · R10 verification depth · live wiring
-(this round: profiles and prices verified against the provider's
-live catalog, the reasoning-model request shape, and the live
-smoke tool) · R11 review
-workbench · R12 task library · R13 challenge pass · R14 batch work
+(profiles and prices verified against the provider's live
+catalog, the reasoning-model request shape, and the live
+smoke tool) · R11 review workbench · R12 task library ·
+R13 challenge pass · R14 batch work
 orders · R15 observability · R16 deployment profiles · R17 MCP
 surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
@@ -681,11 +758,19 @@ prod smoke).
 - The live Baseten adapter is built to Baseten's documented
   OpenAI-compatible shape and is exercised end to end in tests and
   evals through a fake transport replaying recorded-shape
-  responses. It has not yet been run end to end against the real
-  endpoint. `tools/live_smoke.py` is the deployment check that
-  runs it — one gold task on a live profile, printing the recorded
-  evidence — and this status stays as it is until that run has
-  happened and been recorded; nothing here claims otherwise.
+  responses. It has also been run against the real endpoint: on
+  2026-10-19 the blueprint's own adapter ran the gold task
+  reserve-overcommit end to end against Baseten's live Model APIs
+  on `deepseek-ai/DeepSeek-V4-Flash-0731` (profile
+  `baseten-deepseek`) — the model drafted the plan, took 9 tool
+  steps, and produced an in-scope patch to
+  `workshop/inventory.py`; verification passed on both the
+  visible and the hidden grading sets; the run recorded 8 API
+  calls and 20,366 tokens at a total priced cost of $0.00281619
+  under price table v2 (run `run-97f7d412bd`). That is a dated
+  deployment-check result, recorded once — not a standing claim
+  about the endpoint. `tools/live_smoke.py` is the repeatable
+  check that re-runs it and prints the recorded evidence.
 - The offline model is a scripted stand-in: it solves gold tasks from
   the suite's scripted edits and does not pretend to solve ad-hoc
   work (it inspects, runs tests, and finishes without edits).
@@ -745,3 +830,13 @@ prod smoke).
   detection is file-level — whether an edit inside a named file
   strays beyond its step's intent is the challenge pass's
   question (round 13), not this round's.
+- The review workbench (round 11) is folds over the records, so
+  it inherits their resolution: timestamps are second-resolution,
+  so a decision taken inside the run's landing second reads a
+  time-to-decision of 0 — the median is honest arithmetic over
+  honest records, not a finer clock invented for the dashboard.
+  The queue's age is time in the order's current state by its
+  record's last update; an order whose state was entered by an
+  act that did not touch the order record would age from the
+  wrong moment, and every transition in the shell writes the
+  order record — the fold leans on that discipline.
