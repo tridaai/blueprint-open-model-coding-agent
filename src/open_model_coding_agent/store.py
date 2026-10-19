@@ -241,6 +241,46 @@ class SqlStore:
         runs = self.list_runs(work_order_id)
         return runs[-1] if runs else None
 
+    def runs_with_status(self, status: str) -> list[dict]:
+        """Every run in a status, across work orders. Startup
+        reconciliation reads the 'running' set: a row still standing
+        there when a new process boots belonged to a process that
+        died mid-run."""
+        rows = self._all(
+            f"SELECT payload FROM runs WHERE status = {self._ph} "
+            f"ORDER BY created_at, run_id",
+            (status,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    # -- run checkpoints ----------------------------------------------------
+    def append_checkpoint(self, record: dict) -> None:
+        """Checkpoints are append-only: a run's recovery basis is its
+        history, and history is never rewritten."""
+        self._write(
+            f"INSERT INTO run_checkpoints (checkpoint_id, run_id, "
+            f"work_order_id, idx, kind, payload, created_at) VALUES "
+            f"({self._ph}, {self._ph}, {self._ph}, {self._ph}, {self._ph}, "
+            f"{self._ph}, {self._ph})",
+            (
+                record["checkpoint_id"],
+                record["run_id"],
+                record["work_order_id"],
+                int(record["index"]),
+                record["kind"],
+                json.dumps(record),
+                record["created_at"],
+            ),
+        )
+
+    def list_checkpoints(self, run_id: str) -> list[dict]:
+        rows = self._all(
+            f"SELECT payload FROM run_checkpoints WHERE run_id = {self._ph} "
+            f"ORDER BY idx",
+            (run_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
     # -- model usage ------------------------------------------------------
     def append_usage(self, record: dict) -> None:
         self._write(

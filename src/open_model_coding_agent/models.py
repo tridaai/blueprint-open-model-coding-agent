@@ -16,14 +16,21 @@ from pydantic import BaseModel, Field
 #   approved -> plan_ready when a plan amendment lands (the new
 #   version awaits its own decision), and approved -> draft when
 #   execution refuses a stale plan (a fresh plan must be drafted).
+#   Round 5 adds the recovery states: running -> interrupted when a
+#   run dies mid-flight (resumable, or restartable, under the same
+#   approval — an approval is not consumed by a run that did not
+#   finish), and interrupted/failed -> abandoned when a human gives
+#   the run up as a recorded act.
 WORK_ORDER_STATUSES = (
     "draft",
     "plan_ready",
     "plan_rejected",
     "approved",
     "running",
+    "interrupted",
     "succeeded",
     "failed",
+    "abandoned",
     "accepted",
     "rejected",
 )
@@ -100,13 +107,28 @@ class Run(BaseModel):
     work_order_id: str
     plan_version: int
     model_profile: str
-    status: str = "running"  # running | succeeded | failed
+    # running | succeeded | failed | interrupted | abandoned
+    status: str = "running"
     workspace: str = ""
     changed_files: list[str] = Field(default_factory=list)
     patch: str = ""
     steps_used: int = 0
     failure_reason: str | None = None
     verification: dict = Field(default_factory=dict)
+    # Round 5 — failure recovery. An interrupted run names why it
+    # stopped and the last checkpoint it recorded; the checkpoint is
+    # the basis a resume is checked against. An abandoned run names
+    # who gave it up and why, and carries the partial patch — the
+    # diff as far as it got — when edits had landed. A partial patch
+    # is evidence for the humans, never a submittable patch: the
+    # review gate takes SUCCEEDED runs only.
+    interruption_reason: str | None = None
+    last_checkpoint: str | None = None
+    partial_patch: str = ""
+    partial_files: list[str] = Field(default_factory=list)
+    partial_checkpoint: str | None = None
+    abandoned_by: str | None = None
+    abandon_reason: str | None = None
     created_at: str = ""
     finished_at: str | None = None
 
@@ -143,3 +165,16 @@ class ReviewDecisionIn(BaseModel):
     accept: bool
     actor: str
     reason: str | None = None
+
+
+class RunActionIn(BaseModel):
+    """Resume and restart arrive as a bare act: who is doing it."""
+
+    actor: str = "console"
+
+
+class RunAbandonIn(BaseModel):
+    """Abandoning a run is a recorded act: who, and why."""
+
+    actor: str
+    reason: str
