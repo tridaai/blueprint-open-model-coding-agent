@@ -60,6 +60,9 @@
   <h2>Cost per successful task — by model profile</h2>
   <div id="costs"><div class="muted">loading…</div></div>
 
+  <h2>Model promotion — the default is earned</h2>
+  <div id="promotion"><div class="muted">loading…</div></div>
+
   <div id="detail"></div>
 </main>
 <footer>
@@ -93,6 +96,7 @@ async function loadReadiness() {
   const r = await api("/readiness");
   $("readiness").textContent =
     `store: ${r.store} · model profile: ${r.model_profile}` +
+    ` · default profile: ${r.default_model_profile}` +
     (r.baseten_model ? ` · Baseten default slug: ${r.baseten_model}` : "");
 }
 
@@ -138,6 +142,50 @@ async function loadCosts() {
     <div class="muted">Priced under the governed price table (each usage row under the
       table version stamped on it). Unpriced usage is counted, never zeroed;
       the offline model's scripted accounting is characters, never priced as tokens.</div>`;
+}
+
+async function loadPromotion() {
+  const state = await api("/api/promotions");
+  const sets = Object.entries(state.sets || {}).map(([name, s]) =>
+    `${esc(name)}: ${s.tasks.length} tasks · hash ${esc(s.task_set_hash.slice(0, 12))}…`
+  ).join(" · ");
+  let html = `<div class="card">
+    <div>Default model profile: <strong>${esc(state.default_profile_id)}</strong>
+      <span class="muted">(configured seed: ${esc(state.configured_profile_id)} — a promotion
+      event supersedes it; rollback restores the previous default)</span></div>
+    <div class="muted" style="margin-top:4px">Benchmark sets — ${sets}. Promotion is judged
+      on the held-out set only, scored by the worst of 3 runs, against the
+      incumbent's own recorded baseline.</div>`;
+  const evals = state.evaluations || [];
+  if (evals.length) {
+    html += `<table style="margin-top:10px">
+      <thead><tr><th>Evaluation</th><th>Profile</th><th>Set</th><th>Worst run</th>
+        <th>Passed</th><th>Recorded by</th><th>Hash</th></tr></thead>
+      <tbody>${evals.map((e) => `
+        <tr>
+          <td>${esc(e.evaluation_id)}</td>
+          <td>${esc(e.profile_id)}</td>
+          <td>${esc(e.set_name)}</td>
+          <td>${e.worst_successes}/${e.set_size} (runs: ${e.successes_per_run.join(", ")})</td>
+          <td class="${e.passed ? "ok" : "bad"}">${e.passed ? "passed" : "failed — zero-tolerance violation"}</td>
+          <td>${esc(e.actor)}</td>
+          <td>${esc(e.task_set_hash.slice(0, 12))}…</td>
+        </tr>`).join("")}
+      </tbody></table>`;
+  } else {
+    html += `<div class="muted" style="margin-top:8px">No evaluations recorded yet.
+      A profile becomes the default only on a passing held-out evaluation,
+      judged by someone other than the evaluator.</div>`;
+  }
+  const events = state.events || [];
+  if (events.length) {
+    html += `<h3>Promotion history</h3>` + events.map((e) => `
+      <div class="muted">${esc(e.created_at)} — ${esc(e.kind)}:
+        ${esc(e.from_profile || "—")} → <strong>${esc(e.to_profile)}</strong>
+        by ${esc(e.actor)} — ${esc(e.rationale || "")}</div>`).join("");
+  }
+  html += `</div>`;
+  $("promotion").innerHTML = html;
 }
 
 async function createFromGold(id) {
@@ -313,7 +361,7 @@ async function decideReview(id, accept) {
     { accept, actor, reason: accept ? null : "rejected in console" }, id);
 }
 
-loadReadiness(); loadGold(); loadOrders(); loadCosts();
+loadReadiness(); loadGold(); loadOrders(); loadCosts(); loadPromotion();
 </script>
 </body>
 </html>

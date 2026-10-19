@@ -19,8 +19,12 @@ from .logging_setup import request_id_var
 from .model_port import PlanDraft, PlanStepDraft
 from .models import (
     AmendPlanIn,
+    BenchmarkIn,
+    EvaluateIn,
     PlanDecisionIn,
+    PromoteIn,
     ReviewDecisionIn,
+    RollbackIn,
     RunAbandonIn,
     RunActionIn,
     RunStartIn,
@@ -58,12 +62,13 @@ def create_app(settings=None) -> FastAPI:
 
     @app.get("/readiness")
     def readiness():
-        profile = settings.profile
+        profile = service.serving_profile()
         return {
             "status": "ready",
             "store": settings.store_kind,
             "model_profile": profile.profile_id,
             "model_label": profile.label,
+            "default_model_profile": service.default_profile_id(),
             "baseten_base_url": profile.base_url,
             "baseten_model": profile.model,
         }
@@ -76,6 +81,37 @@ def create_app(settings=None) -> FastAPI:
     @app.get("/api/costs")
     def costs():
         return service.cost_report()
+
+    # -- benchmarks and the promotion gate ----------------------------------
+    @app.get("/api/benchmarks")
+    def benchmarks():
+        return service.list_benchmarks()
+
+    @app.post("/api/benchmarks", status_code=201)
+    def run_benchmark(body: BenchmarkIn):
+        return service.run_benchmark(
+            body.profile_id, set_name=body.set_name, actor=body.actor
+        )
+
+    @app.get("/api/promotions")
+    def promotions():
+        return service.promotion_state()
+
+    @app.post("/api/promotions/evaluate", status_code=201)
+    def evaluate(body: EvaluateIn):
+        return service.evaluate_profile(
+            body.profile_id, actor=body.actor, times=body.times
+        )
+
+    @app.post("/api/promotions/promote")
+    def promote(body: PromoteIn):
+        return service.promote(
+            body.profile_id, actor=body.actor, rationale=body.rationale
+        )
+
+    @app.post("/api/promotions/rollback")
+    def rollback(body: RollbackIn):
+        return service.rollback(actor=body.actor, rationale=body.rationale)
 
     # -- gold tasks ------------------------------------------------------
     @app.get("/api/gold-tasks")

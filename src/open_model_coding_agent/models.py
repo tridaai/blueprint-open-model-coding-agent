@@ -192,3 +192,38 @@ class RunAbandonIn(BaseModel):
 
     actor: str
     reason: str
+
+
+class BenchmarkIn(BaseModel):
+    """A benchmark arrives as an act: which profile, over which
+    set, recorded by whom."""
+
+    profile_id: str
+    set_name: str = "tuning"
+    actor: str = "console"
+
+
+class EvaluateIn(BaseModel):
+    """A promotion evaluation: the held-out set, run ``times``
+    times (the gate's default is the worst of 3)."""
+
+    profile_id: str
+    actor: str
+    times: int = 3
+
+
+class PromoteIn(BaseModel):
+    """Promotion is a judged act: the profile, the judge, and the
+    rationale the judgement stands on."""
+
+    profile_id: str
+    actor: str
+    rationale: str
+
+
+class RollbackIn(BaseModel):
+    """Rollback is a recorded act too: who restored the previous
+    default, and why."""
+
+    actor: str
+    rationale: str
