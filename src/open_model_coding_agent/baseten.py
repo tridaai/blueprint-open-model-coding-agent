@@ -18,6 +18,17 @@ Failures are named, bounded, and final: 401 is ``model_auth_failed``,
 times with backoff and then fail by name. Nothing retries forever,
 nothing falls back to another model, and a failure inside a run is a
 GateError the service records as the run's failure reason.
+
+Every request carries the profile's recorded ``max_tokens`` ceiling.
+That number matters more than it looks: the models on the shortlist
+are reasoning models, which spend completion tokens on
+``reasoning_content`` before any visible answer exists, so a small
+ceiling buys an empty reply. When that is exactly what comes back —
+``finish_reason`` ``length`` and no content, no tool calls — the
+adapter fails by name (``model_output_truncated``) instead of
+handing the shell an empty string to misread as a malformed plan,
+and the spent call's usage is still recorded first: the tokens were
+spent, so the ledger says so.
 """
 
 from __future__ import annotations
@@ -282,6 +293,9 @@ class BasetenModel(ModelPort):
             "model": self.profile.model,
             "messages": messages,
             "temperature": 0,
+            # The profile's recorded ceiling, never a constant in
+            # code: a reasoning model's budget is a per-model fact.
+            "max_tokens": self.profile.max_tokens,
         }
         if tools:
             body["tools"] = TOOL_SCHEMAS
@@ -380,6 +394,24 @@ class BasetenModel(ModelPort):
         if not isinstance(message, dict):
             raise GateError(
                 "model_response_invalid", "the model response carried no message"
+            )
+        # Usage is noted BEFORE this check on purpose: a truncated
+        # call still spent its tokens, and the ledger records them.
+        content = message.get("content")
+        if (
+            choices[0].get("finish_reason") == "length"
+            and not message.get("tool_calls")
+            and not (isinstance(content, str) and content.strip())
+        ):
+            raise GateError(
+                "model_output_truncated",
+                f"the model stopped at the profile's max_tokens "
+                f"ceiling ({self.profile.max_tokens}) with nothing "
+                f"usable returned — finish_reason 'length' and empty "
+                f"content (a reasoning model can spend the whole "
+                f"budget on reasoning before answering). Raise "
+                f"max_tokens on the {self.profile.profile_id!r} "
+                f"profile record, or shorten the request.",
             )
         return message
 
