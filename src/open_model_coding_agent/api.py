@@ -72,6 +72,11 @@ def create_app(settings=None) -> FastAPI:
     def console():
         return FileResponse(STATIC / "index.html")
 
+    # -- costs -------------------------------------------------------------
+    @app.get("/api/costs")
+    def costs():
+        return service.cost_report()
+
     # -- gold tasks ------------------------------------------------------
     @app.get("/api/gold-tasks")
     def gold_tasks():

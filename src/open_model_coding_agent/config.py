@@ -38,10 +38,21 @@ def load_profile(profile_id: str, profiles_dir: Path | None = None) -> ModelProf
 
 @dataclass(frozen=True)
 class Policy:
-    """Governed ceilings for one run. Deeper budgets land in round 6."""
+    """Governed ceilings for one run, enforced in the shell.
+
+    The step ceiling has been here since round 1; round 6 adds the
+    priced budgets: a ceiling on model calls, on provider-measured
+    tokens, and on active wall-clock seconds. A run snapshots all
+    of them at start, so a policy change mid-flight never moves a
+    running run's ceilings; a resumed run spends against the same
+    snapshot and the same accumulated usage.
+    """
 
     max_steps: int = 40
     test_timeout_seconds: int = 120
+    max_model_calls: int = 200
+    max_tokens: int = 2_000_000
+    max_wall_seconds: int = 1800
 
 
 @dataclass
@@ -50,6 +61,7 @@ class Settings:
     database_url: str | None = None
     model_profile: str = "offline"
     profiles_dir: Path = field(default_factory=lambda: REPO_ROOT / "profiles")
+    prices_dir: Path = field(default_factory=lambda: REPO_ROOT / "prices")
     # Test seam: an injected HTTP transport for the live adapter.
     # Never set from the environment; production uses the real one.
     model_transport: object | None = field(default=None, repr=False)
@@ -94,6 +106,7 @@ def load_settings(**overrides) -> Settings:
         "database_url": os.environ.get("DATABASE_URL") or None,
         "model_profile": os.environ.get("MODEL_PROFILE", "offline"),
         "profiles_dir": Path(os.environ.get("PROFILES_DIR", REPO_ROOT / "profiles")),
+        "prices_dir": Path(os.environ.get("PRICES_DIR", REPO_ROOT / "prices")),
         "migrations_dir": Path(os.environ.get("MIGRATIONS_DIR", REPO_ROOT / "migrations")),
         "gold_dir": Path(os.environ.get("GOLD_DIR", REPO_ROOT / "evals" / "gold")),
         "targets_dir": Path(os.environ.get("TARGETS_DIR", REPO_ROOT / "data" / "targets")),
@@ -104,6 +117,9 @@ def load_settings(**overrides) -> Settings:
         "policy": Policy(
             max_steps=_int_env("CODINGAGENT_MAX_STEPS", 40),
             test_timeout_seconds=_int_env("CODINGAGENT_TEST_TIMEOUT", 120),
+            max_model_calls=_int_env("CODINGAGENT_MAX_MODEL_CALLS", 200),
+            max_tokens=_int_env("CODINGAGENT_MAX_TOKENS", 2_000_000),
+            max_wall_seconds=_int_env("CODINGAGENT_MAX_WALL_SECONDS", 1800),
         ),
     }
     env.update(overrides)

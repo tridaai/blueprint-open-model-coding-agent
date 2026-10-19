@@ -129,6 +129,20 @@ class Run(BaseModel):
     partial_checkpoint: str | None = None
     abandoned_by: str | None = None
     abandon_reason: str | None = None
+    # Round 6 — budgets and the cost ledger. The ceilings in force
+    # are snapshotted onto the run at start (a policy change never
+    # moves a run already launched, and a resume spends against the
+    # same snapshot and the same accumulated usage). A run stopped
+    # by its budget names the ceiling in budget_stop; it lands
+    # INTERRUPTED, refuses resume by name, and restarts only into a
+    # fresh budget. elapsed_seconds counts the run's ACTIVE seconds
+    # across attempts — time spent interrupted, waiting on a human,
+    # is not the run's wall clock. cost is the priced fold of the
+    # run's usage, recomputed at every landing.
+    budget: dict = Field(default_factory=dict)
+    budget_stop: str | None = None
+    elapsed_seconds: float = 0.0
+    cost: dict = Field(default_factory=dict)
     created_at: str = ""
     finished_at: str | None = None
 

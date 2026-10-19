@@ -49,11 +49,27 @@ reason recorded, rather than crashing the shell.
   finish. Abandoning a run is a recorded act that names the partial
   patch — the diff as far as it got — and a partial patch can never
   reach the review gate.
+- A run spends against a budget, enforced in the shell — ceilings
+  on model calls, provider-measured tokens, and active wall-clock
+  seconds, snapshotted onto the run at start. The loop checks the
+  budget before every model call and after every usage record
+  lands; crossing a ceiling stops the run INTERRUPTED with the
+  ceiling named, and a budget-stopped run cannot resume (a resume
+  would overspend the same budget) — restart is its way back, into
+  a fresh budget. Every run's usage is priced by the governed price
+  table, in Decimal, and stored on the run as its cost: the drafting
+  of its plan, and its execution. A slug the table leaves unpriced
+  folds as unpriced — counted, with the reason named, never zero —
+  and the scripted model's character accounting is never priced as
+  tokens. The suite folds the same rows per profile into cost per
+  successful task: all of a profile's priced spend over its
+  verified successes.
 """
 
 from __future__ import annotations
 
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -65,6 +81,7 @@ from .model_port import Step, make_model, validate_plan_draft
 from .models import Plan, PlanStep, Run, WorkOrder, WorkOrderIn
 from .patch import PatchError, apply_patch, build_patch
 from .plans import diff_plans, drifted_files, file_digests, scope_fingerprint
+from .prices import current_table, fold_usage, load_price_tables
 from .store import SqlStore, utcnow
 from .tools import SandboxTools, dispatch
 
@@ -85,6 +102,19 @@ _TRANSIENT_MODEL_CODES = frozenset(
         "model_unreachable",
     }
 )
+
+
+class _BudgetStop(Exception):
+    """The run crossed a budget ceiling. Carries the ceiling's name
+    (``model_calls`` | ``tokens`` | ``wall_seconds``), the ceiling,
+    and what the run had spent when the loop stopped it — the facts
+    the interruption record and the audit trail name."""
+
+    def __init__(self, ceiling: str, limit: int, used: int) -> None:
+        super().__init__(f"budget_exhausted: {ceiling} ceiling {limit} reached at {used}")
+        self.ceiling = ceiling
+        self.limit = limit
+        self.used = used
 
 
 class _RunProgress:
@@ -116,6 +146,14 @@ class CodingService:
         self.settings = settings
         self.store = SqlStore(settings)
         self.gold = GoldSuite(settings.gold_dir)
+        # The price table is governed data, loaded fail-closed at
+        # startup like the profiles: a deployment with no table, or
+        # a malformed one, does not start half-priced.
+        self.price_tables = load_price_tables(settings.prices_dir)
+        self.price_table = current_table(self.price_tables)
+        # Test seam: the wall clock budgets read. Production uses
+        # time.monotonic; tests may substitute a scripted clock.
+        self._monotonic = time.monotonic
         for folder in (settings.targets_dir, settings.runs_dir, settings.artifacts_dir):
             folder.mkdir(parents=True, exist_ok=True)
         self._reconcile_orphaned_runs()
@@ -127,7 +165,9 @@ class CodingService:
     # -- model usage -----------------------------------------------------
     def _persist_usage(self, model, *, work_order_id: str, run_id: str | None) -> None:
         """Drain the model's accounting into stored usage records,
-        stamped with the call's context and the serving profile."""
+        stamped with the call's context, the serving profile, and
+        the price-table version in force — the version the row will
+        be costed under, however the table moves later."""
         for record in model.drain_usage():
             self.store.append_usage(
                 {
@@ -135,12 +175,17 @@ class CodingService:
                     "run_id": run_id,
                     "work_order_id": work_order_id,
                     "profile_id": self.settings.model_profile,
+                    "price_table_version": self.price_table.version,
                 }
             )
 
     def _attach_usage(self, run: dict) -> dict:
         """A run read carries its evidence with it: the usage rows
-        and totals, and the checkpoint history it recorded."""
+        and totals, the checkpoint history it recorded, and its
+        priced cost. The cost fold is recomputed while the run is
+        not terminal, so a run still standing interrupted shows what
+        it has spent so far; a terminal run keeps the fold stored
+        when it landed."""
         rows = self.store.list_usage(run_id=run["run_id"])
         run["usage"] = rows
         run["usage_totals"] = {
@@ -150,6 +195,8 @@ class CodingService:
             "latency_ms": sum(r["latency_ms"] for r in rows),
         }
         run["checkpoints"] = self.store.list_checkpoints(run["run_id"])
+        if run["status"] not in ("succeeded", "failed", "abandoned"):
+            run["cost"] = self._cost_for_run(run)
         return run
 
     def _make_model(self, *, scripts=None):
@@ -159,6 +206,125 @@ class CodingService:
             profile=self.settings.profile,
             transport=self.settings.model_transport,
         )
+
+    # -- budgets and the cost ledger --------------------------------------
+    def _budget_snapshot(self) -> dict:
+        """The ceilings a new run starts under, copied from policy
+        onto the run record. From then on the run's snapshot rules
+        it — not the policy, which a deployment may retune whenever
+        it likes without moving runs already launched."""
+        policy = self.settings.policy
+        return {
+            "max_model_calls": policy.max_model_calls,
+            "max_tokens": policy.max_tokens,
+            "max_wall_seconds": policy.max_wall_seconds,
+        }
+
+    def _budget_usage(self, run_id: str) -> tuple[int, int]:
+        """What a run has spent, from its stored usage rows: the
+        model calls recorded, and the provider-measured tokens.
+        Scripted character accounting is not tokens and never counts
+        toward the token ceiling."""
+        rows = self.store.list_usage(run_id=run_id)
+        tokens = sum(
+            r["prompt_tokens"] + r["completion_tokens"]
+            for r in rows
+            if r["unit"] == "tokens"
+        )
+        return len(rows), tokens
+
+    def _budget_breach(
+        self, run: Run, *, after_call: bool, attempt_started: float
+    ) -> _BudgetStop | None:
+        """Has this run crossed a ceiling? Checked before each model
+        call (``after_call=False``: at a ceiling, no further call is
+        made) and after each usage record lands (``after_call=True``:
+        the call that just landed may itself have crossed the token
+        ceiling — the run stops there, so its overshoot is bounded
+        by that single in-flight call)."""
+        budget = run.budget or self._budget_snapshot()
+        calls, tokens = self._budget_usage(run.run_id)
+        elapsed = run.elapsed_seconds + (self._monotonic() - attempt_started)
+        if calls > budget["max_model_calls"] or (
+            not after_call and calls >= budget["max_model_calls"]
+        ):
+            return _BudgetStop("model_calls", budget["max_model_calls"], calls)
+        if tokens > budget["max_tokens"] or (
+            not after_call and tokens >= budget["max_tokens"]
+        ):
+            return _BudgetStop("tokens", budget["max_tokens"], tokens)
+        if elapsed >= budget["max_wall_seconds"]:
+            return _BudgetStop(
+                "wall_seconds",
+                budget["max_wall_seconds"],
+                int(elapsed),
+            )
+        return None
+
+    def _cost_for_run(self, run: dict) -> dict:
+        """A run's priced cost, folded from its usage rows — each
+        row priced under the table version stamped on it. The split:
+        plan is the cost of drafting the plan this run's work order
+        carries (the order's plan-phase rows; a work order's runs
+        share the one drafting), execution is this run's own rows.
+        Unpriced usage is counted with its reasons and kept out of
+        the money, never zeroed."""
+        execution_rows = self.store.list_usage(run_id=run["run_id"])
+        order_rows = self.store.list_usage(work_order_id=run["work_order_id"])
+        plan_rows = [r for r in order_rows if r["run_id"] is None]
+        plan_fold = fold_usage(plan_rows, self.price_tables)
+        execution_fold = fold_usage(execution_rows, self.price_tables)
+        total = fold_usage(plan_rows + execution_rows, self.price_tables)
+        return {
+            "currency": "USD",
+            "total": str(total.priced_cost),
+            "plan": str(plan_fold.priced_cost),
+            "execution": str(execution_fold.priced_cost),
+            "priced_tokens": total.priced_tokens,
+            "priced_calls": total.priced_calls,
+            "unpriced_tokens": total.unpriced_tokens,
+            "unpriced_calls": total.unpriced_calls,
+            "scripted_calls": total.scripted_calls,
+            "scripted_chars": total.scripted_chars,
+            "price_table_versions": total.price_table_versions,
+            "unpriced_reasons": total.unpriced_reasons,
+        }
+
+    def cost_report(self) -> dict:
+        """The suite fold: per profile, what the work cost and what
+        it bought. Runs and verified successes are counted from the
+        run records; money is folded from ALL of the profile's usage
+        rows — drafting, execution, successes, failures, and
+        interruptions alike — because cost per successful task is
+        honest only when the failures are in the numerator. Each
+        row is priced under the table version stamped on it."""
+        runs = self.store.all_runs()
+        usage = self.store.list_usage()
+        profiles: list[dict] = []
+        seen = {r["model_profile"] for r in runs} | {u["profile_id"] for u in usage}
+        for profile_id in sorted(seen):
+            profile_runs = [r for r in runs if r["model_profile"] == profile_id]
+            successes = sum(
+                1 for r in profile_runs if r["status"] == "succeeded"
+            )
+            rows = [u for u in usage if u["profile_id"] == profile_id]
+            fold = fold_usage(rows, self.price_tables)
+            entry = fold.as_dict(successes=successes)
+            entry = {
+                "profile_id": profile_id,
+                "runs": len(profile_runs),
+                **entry,
+            }
+            profiles.append(entry)
+        total_fold = fold_usage(usage, self.price_tables)
+        total_successes = sum(1 for r in runs if r["status"] == "succeeded")
+        return {
+            "profiles": profiles,
+            "total": {
+                "runs": len(runs),
+                **total_fold.as_dict(successes=total_successes),
+            },
+        }
 
     def audit(self, work_order_id: str) -> list[dict]:
         return self.store.list_audit("work_order", work_order_id)
@@ -556,6 +722,7 @@ class CodingService:
                 plan_version=plan["version"],
                 model_profile=self.settings.model_profile,
                 workspace=str(workspace),
+                budget=self._budget_snapshot(),
                 created_at=utcnow(),
             )
             self.store.put_run(run.model_dump())
@@ -592,6 +759,11 @@ class CodingService:
             )
             run.status = "running"
             run.interruption_reason = None
+            if not run.budget:
+                # A run recorded before budgets existed resumes under
+                # a snapshot taken now; a run that has one keeps it —
+                # a resume never refreshes a budget.
+                run.budget = self._budget_snapshot()
             self.store.put_run(run.model_dump())
             self._set_status(order, "running")
             self._audit(
@@ -613,13 +785,31 @@ class CodingService:
         max_steps = self.settings.policy.max_steps
         model_error: GateError | None = None
         crash: Exception | None = None
+        budget_stop: _BudgetStop | None = None
+        attempt_started = self._monotonic()
         try:
             model.start_run(work_order=order, plan=plan)
             if resume_run is not None and transcript:
                 model.prepare_resume(transcript=transcript)
             while steps < max_steps:
+                # The budget is checked before every model call: at
+                # a ceiling, the call is not made at all.
+                stop = self._budget_breach(
+                    run, after_call=False, attempt_started=attempt_started
+                )
+                if stop is not None:
+                    raise stop
                 step: Step = model.next_step(transcript=transcript)
                 self._persist_usage(model, work_order_id=work_order_id, run_id=run_id)
+                # And after the call's usage lands: the call itself
+                # may have crossed the token ceiling. The run stops
+                # here, so the overshoot is that one in-flight call
+                # and no more.
+                stop = self._budget_breach(
+                    run, after_call=True, attempt_started=attempt_started
+                )
+                if stop is not None:
+                    raise stop
                 steps += 1
                 if step.tool == "finish":
                     transcript.append({"tool": "finish", "ok": True, "output": ""})
@@ -650,6 +840,9 @@ class CodingService:
                     and not result.refused
                 ):
                     self._after_landed_edit(plan, run, progress, result)
+        except _BudgetStop as exc:
+            budget_stop = exc
+            self._persist_usage(model, work_order_id=work_order_id, run_id=run_id)
         except GateError as exc:
             # A model-side failure: how the run lands depends on the
             # failure's kind, decided below — transient failures
@@ -662,6 +855,9 @@ class CodingService:
             crash = exc
             self._persist_usage(model, work_order_id=work_order_id, run_id=run_id)
         run.steps_used = steps
+        run.elapsed_seconds = round(
+            run.elapsed_seconds + (self._monotonic() - attempt_started), 3
+        )
 
         if model_error is not None and model_error.code not in _TRANSIENT_MODEL_CODES:
             reason = f"model call failed: {model_error.code} — {model_error.message}"
@@ -673,6 +869,7 @@ class CodingService:
                 "model_error": model_error.code,
             }
             run.finished_at = utcnow()
+            run.cost = self._cost_for_run(run.model_dump())
             self.store.put_run(run.model_dump())
             self._set_status(order, "failed")
             self._audit(
@@ -686,6 +883,40 @@ class CodingService:
             log_event(
                 "run_finished", work_order_id=work_order_id, run_id=run_id,
                 status="failed",
+            )
+            return self._attach_usage(run.model_dump())
+
+        if budget_stop is not None:
+            # The run crossed a budget ceiling. It lands INTERRUPTED
+            # — the work is not wrong, the spend is done — with the
+            # ceiling named on its record. A budget-stopped run
+            # cannot resume (resume would overspend the same budget;
+            # see resume_run) — restart, into a fresh budget, is its
+            # way back.
+            reason = (
+                f"budget_exhausted: the run crossed its "
+                f"{budget_stop.ceiling} budget (ceiling "
+                f"{budget_stop.limit}, spent {budget_stop.used})"
+            )
+            run.status = "interrupted"
+            run.budget_stop = budget_stop.ceiling
+            run.interruption_reason = reason
+            run.cost = self._cost_for_run(run.model_dump())
+            self.store.put_run(run.model_dump())
+            self._set_status(order, "interrupted")
+            self._audit(
+                "work_order", work_order_id, "budget_exhausted", "shell",
+                run_id=run_id, ceiling=budget_stop.ceiling,
+                limit=budget_stop.limit, used=budget_stop.used,
+            )
+            self._audit(
+                "work_order", work_order_id, "run_interrupted", "shell",
+                run_id=run_id, code="budget_exhausted", reason=reason,
+                last_checkpoint=run.last_checkpoint, steps_used=steps,
+            )
+            log_event(
+                "run_interrupted", work_order_id=work_order_id,
+                run_id=run_id, reason="budget_exhausted",
             )
             return self._attach_usage(run.model_dump())
 
@@ -709,6 +940,7 @@ class CodingService:
                 )
             run.status = "interrupted"
             run.interruption_reason = reason
+            run.cost = self._cost_for_run(run.model_dump())
             self.store.put_run(run.model_dump())
             self._set_status(order, "interrupted")
             if model_error is not None:
@@ -740,6 +972,7 @@ class CodingService:
             run.status = "failed"
             run.failure_reason = verification["reason"]
             self._set_status(order, "failed")
+        run.cost = self._cost_for_run(run.model_dump())
         self.store.put_run(run.model_dump())
         self._audit(
             "work_order", work_order_id, "verification_completed", "shell",
@@ -928,6 +1161,23 @@ class CodingService:
                 f"only an interrupted run can resume; run {run['run_id']} "
                 f"is {run['status']}",
             )
+        if run.get("budget_stop"):
+            # A budget-stopped run's budget is spent; resuming would
+            # spend past the ceiling the run was stopped by. Refused
+            # by the budget's own name — restart, which snapshots a
+            # fresh budget, is the way back.
+            self._audit(
+                "work_order", work_order_id, "resume_refused", actor,
+                run_id=run["run_id"], basis="budget_exhausted",
+                reason=run.get("interruption_reason") or "",
+            )
+            raise GateError(
+                "budget_exhausted",
+                f"resume refused: run {run['run_id']} was stopped by "
+                f"its {run['budget_stop']} budget, and that budget is "
+                f"spent — a resume would overspend the ceiling it was "
+                f"stopped by; restart the run to spend a fresh budget",
+            )
         plan = self._resume_basis(order, run, actor)
         return self._launch(order, plan, actor, resume_run=run)
 
@@ -1101,6 +1351,7 @@ class CodingService:
         run.abandoned_by = actor
         run.abandon_reason = reason
         run.finished_at = run.finished_at or utcnow()
+        run.cost = self._cost_for_run(run.model_dump())
         self.store.put_run(run.model_dump())
         latest = self.store.latest_run(work_order_id)
         if latest is not None and latest["run_id"] == run.run_id:

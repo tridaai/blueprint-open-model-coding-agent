@@ -57,6 +57,9 @@
     <tbody id="orders"></tbody>
   </table>
 
+  <h2>Cost per successful task — by model profile</h2>
+  <div id="costs"><div class="muted">loading…</div></div>
+
   <div id="detail"></div>
 </main>
 <footer>
@@ -107,6 +110,36 @@ async function loadGold() {
     </div>`).join("");
 }
 
+async function loadCosts() {
+  const report = await api("/api/costs");
+  const money = (v) => (v === null || v === undefined) ? "—" : "$" + v;
+  const row = (label, e) => `
+    <tr>
+      <td>${esc(label)}</td>
+      <td>${e.runs}</td>
+      <td>${e.successful_tasks}</td>
+      <td>${money(e.cost_per_successful_task)}</td>
+      <td>${money(e.priced_cost)}</td>
+      <td>${e.priced_tokens} priced · ${e.unpriced_tokens} unpriced` +
+        (e.unpriced_reasons && e.unpriced_reasons.length
+          ? ` (${e.unpriced_reasons.map(esc).join(", ")})` : "") +
+        (e.scripted_chars ? ` · ${e.scripted_chars} scripted chars (never priced)` : "") +
+      `</td>
+    </tr>`;
+  $("costs").innerHTML = `
+    <table>
+      <thead><tr><th>Profile</th><th>Runs</th><th>Verified successes</th>
+        <th>Cost / successful task</th><th>Priced spend</th><th>Usage</th></tr></thead>
+      <tbody>
+        ${(report.profiles || []).map((p) => row(p.profile_id, p)).join("")}
+        ${row("all profiles", report.total)}
+      </tbody>
+    </table>
+    <div class="muted">Priced under the governed price table (each usage row under the
+      table version stamped on it). Unpriced usage is counted, never zeroed;
+      the offline model's scripted accounting is characters, never priced as tokens.</div>`;
+}
+
 async function createFromGold(id) {
   try {
     const order = await api(`/api/work-orders/from-gold/${id}`, "POST");
@@ -135,6 +168,7 @@ async function act(path, body, id) {
   try {
     await api(path, "POST", body);
     await loadOrders();
+    await loadCosts();
     await showDetail(id);
   } catch (e) { showError(e); }
 }
@@ -168,9 +202,19 @@ async function showDetail(id) {
   }
   if (run) {
     const v = run.verification || {};
+    const c = run.cost || {};
+    const b = run.budget || {};
     html += `<h3>Run ${esc(run.run_id)} — ${esc(run.status)}</h3>
       <div class="muted">steps: ${run.steps_used} · changed: ${(run.changed_files || []).map(esc).join(", ") || "none"}</div>
       <div>Verification: <span class="${v.passed ? "ok" : "bad"}">${esc(v.reason || "")}</span></div>`;
+    if (c.total !== undefined) {
+      html += `<div class="muted">cost: $${esc(c.total)} (plan $${esc(c.plan)} · execution $${esc(c.execution)})` +
+        (b.max_tokens ? ` · budget: ${b.max_model_calls} calls / ${b.max_tokens} tokens / ${b.max_wall_seconds}s` : ``) +
+        (run.budget_stop ? ` · <span class="bad">stopped by its ${esc(run.budget_stop)} budget</span>` : ``) +
+        (c.unpriced_tokens ? ` · ${c.unpriced_tokens} tokens unpriced (${(c.unpriced_reasons || []).map(esc).join(", ")})` : ``) +
+        (c.scripted_chars ? ` · ${c.scripted_chars} scripted chars (never priced)` : ``) +
+        `</div>`;
+    }
     if (run.patch) html += `<pre>${esc(run.patch)}</pre>`;
     if (run.interruption_reason) {
       html += `<div class="bad" style="margin-top:8px">Interrupted — ${esc(run.interruption_reason)}` +
@@ -269,7 +313,7 @@ async function decideReview(id, accept) {
     { accept, actor, reason: accept ? null : "rejected in console" }, id);
 }
 
-loadReadiness(); loadGold(); loadOrders();
+loadReadiness(); loadGold(); loadOrders(); loadCosts();
 </script>
 </body>
 </html>

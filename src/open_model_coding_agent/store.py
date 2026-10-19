@@ -241,6 +241,14 @@ class SqlStore:
         runs = self.list_runs(work_order_id)
         return runs[-1] if runs else None
 
+    def all_runs(self) -> list[dict]:
+        """Every run on record, across work orders, oldest first.
+        The cost report folds over this set."""
+        rows = self._all(
+            "SELECT payload FROM runs ORDER BY created_at, run_id"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
     def runs_with_status(self, status: str) -> list[dict]:
         """Every run in a status, across work orders. Startup
         reconciliation reads the 'running' set: a row still standing
@@ -283,12 +291,14 @@ class SqlStore:
 
     # -- model usage ------------------------------------------------------
     def append_usage(self, record: dict) -> None:
+        version = record.get("price_table_version")
         self._write(
             f"INSERT INTO model_usage (run_id, work_order_id, profile_id, "
             f"model, source, unit, prompt_tokens, completion_tokens, "
-            f"latency_ms, created_at) VALUES ({self._ph}, {self._ph}, "
+            f"latency_ms, price_table_version, created_at) VALUES "
+            f"({self._ph}, {self._ph}, {self._ph}, {self._ph}, {self._ph}, "
             f"{self._ph}, {self._ph}, {self._ph}, {self._ph}, {self._ph}, "
-            f"{self._ph}, {self._ph}, {self._ph})",
+            f"{self._ph})",
             (
                 record.get("run_id"),
                 record["work_order_id"],
@@ -299,6 +309,7 @@ class SqlStore:
                 int(record["prompt_tokens"]),
                 int(record["completion_tokens"]),
                 int(record["latency_ms"]),
+                int(version) if version is not None else None,
                 utcnow(),
             ),
         )
@@ -316,7 +327,8 @@ class SqlStore:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         return self._all(
             f"SELECT seq, run_id, work_order_id, profile_id, model, source, "
-            f"unit, prompt_tokens, completion_tokens, latency_ms, created_at "
+            f"unit, prompt_tokens, completion_tokens, latency_ms, "
+            f"price_table_version, created_at "
             f"FROM model_usage{where} ORDER BY seq",
             tuple(params),
         )
