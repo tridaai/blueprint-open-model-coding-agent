@@ -87,17 +87,47 @@ in code rather than prompted, and where the rounds go from here.
   Run reads fold their rows in, with totals — the raw material the
   priced cost ledger (round 6) spends.
 - **`tools.py` — the tool port.** The only hands the agent has,
-  rooted at one run workspace:
-  - `list_files`, `read_file`, `search` — reads, confined to the
-    workspace by path resolution.
-  - `edit_file` — an *anchored* replacement: the old text must occur
-    exactly once, and the file must be inside the plan's approved
-    scope. Refusals are returned as data and recorded.
+  rooted at one run workspace. Every result is structured — `ok`,
+  output, `refused`, a stable `code` naming a refusal, and a
+  `detail` dict — and the service records each result verbatim on
+  the run's audit trail, so a refusal or truncation is a stored
+  record, not a log line:
+  - `list_files` — the workspace's files, confined by path
+    resolution.
+  - `read_file` — one file, optionally a 1-based line range. Past
+    the read ceiling (32 KiB) the head comes back with a truncation
+    marker naming the file's total size; binary or undecodable
+    files refuse as `binary_file` instead of returning garbage;
+    bad ranges refuse as `invalid_line_range` /
+    `line_range_out_of_bounds`.
+  - `search` — regex over workspace files, matches with file, line,
+    and a bounded context window. Case sensitivity and `glob`/`path`
+    scoping are explicit parameters that cannot reach outside the
+    workspace (`search_outside_workspace`, `search_glob_invalid`).
+    When matches exceed the limit, the output ends with a
+    truncation marker naming the true total — the cut is labelled,
+    never silent.
+  - `edit_file` — an *anchored* replacement, the only way code
+    changes (there is no whole-file write and no append tool): the
+    anchor must occur exactly once, and the file must be inside the
+    plan's approved scope. Zero occurrences refuse as
+    `anchor_not_found`, several as `anchor_ambiguous` — both are
+    data the model can act on (re-read, narrow the anchor), not
+    retries in the dark. A landed edit records the anchor and the
+    file's before/after SHA-256 digests.
   - `run_tests` — the single allowed command shape: pytest over
     named, existing test files inside the workspace. There is no
     shell and no way to name another command. The child environment
     is scrubbed of every variable whose name carries a credential
-    marker (KEY, TOKEN, SECRET, PASSWORD, AUTH, CREDENTIAL).
+    marker (KEY, TOKEN, SECRET, PASSWORD, AUTH, CREDENTIAL). With
+    `only_affected`, it runs the **affected set** the shell
+    computes in code from the plan's steps and the run's actual
+    edits: a step naming an edited file contributes its tests
+    (plan rule), and a workspace test file importing an edited
+    module is affected (import rule). `paths` then names a subset
+    of that set — the model can request the set, never define it.
+    Verification still runs the full grading set on the pristine
+    copy; the affected set is quick feedback, never the verdict.
 - **`patch.py` — patches with proof.** A run's patch is a unified
   diff of workspace vs the pristine snapshot. `apply_patch` replays
   it with every hunk's context verified; a mismatch raises rather
@@ -206,7 +236,7 @@ round 7.
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
-staleness (this round) · R4 tool depth · R5 failure recovery · R6 budgets
+staleness · R4 tool depth (this round) · R5 failure recovery · R6 budgets
 + cost ledger · R7 model promotion gate · R8 shortlist comparison ·
 R9 injection red team · R10 verification depth · R11 review
 workbench · R12 task library · R13 challenge pass · R14 batch work
@@ -215,7 +245,7 @@ surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
 prod smoke).
 
-## Honest limits (round 3)
+## Honest limits (round 4)
 
 - The live Baseten adapter is built to Baseten's documented
   OpenAI-compatible shape and is exercised end to end in tests and

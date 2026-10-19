@@ -114,7 +114,18 @@ make serve       # API + console on http://localhost:8000
    and the command allowlist in code: edits outside the scope are
    refused and recorded; the only command shape is pytest over named
    test files; the child environment is scrubbed of every
-   credential-looking variable.
+   credential-looking variable. The tools have depth, not just
+   guards: an edit's anchor must occur exactly once — a missing or
+   ambiguous anchor refuses by name (`anchor_not_found`,
+   `anchor_ambiguous`) as data the model can act on, and a landed
+   edit records its anchor and the file's before/after digests;
+   reads take line ranges and label any truncation with the file's
+   true size; search results carry context and label their own
+   truncation with the true match total; and the tests a run's
+   edits affect are computed by the shell from the plan's steps and
+   the actual edits — the model can ask for that set, never define
+   it. Every tool result, refusals included, is recorded verbatim
+   on the run's audit trail.
 4. **Verification in code.** The run's patch is applied to a fresh
    copy of the target and the task's grading tests run there. A run
    is SUCCEEDED only when the patch applies cleanly, stays in scope,
@@ -166,16 +177,17 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–3 are built and gated: **61 tests passing, evals PASS**
+Rounds 1–4 are built and gated: **75 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
-gold task end to end through the Baseten adapter's code path;
-counters at zero). The live adapter is exercised in tests and evals
+gold task end to end through the Baseten adapter's code path and a
+recovery leg where an ambiguous first edit refuses by name and the
+run still lands its repair; counters at zero). The live adapter is exercised in tests and evals
 through a fake transport replaying recorded-shape responses — it
 has **not yet been run against the real Baseten endpoint**, which
 needs a `BASETEN_API_KEY`; the first live smoke is a deployment
 step, and this status will say so until it has happened. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: tool depth (round 4), budgets
+`docs/architecture.md`: failure recovery (round 5), budgets
 and the priced cost ledger (round 6), the model promotion gate
 (round 7), and the shortlist comparison (round 8). The Postgres
 profile is code-complete behind the store port (SQLite is the local
