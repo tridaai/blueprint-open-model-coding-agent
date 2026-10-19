@@ -82,6 +82,15 @@ recorded-shape responses (no network, no key):
    names what changed (plan version, verdicts); and the reviewer
    accepts. Reviewer history folds the leg's decisions by actor.
 
+13. TASK LIBRARY (round 12) — a library leg instantiating a seed
+   template onto its matching gold task: the seeds stand published
+   by a second actor; instantiation substitutes the parameters,
+   records the provenance, and smuggles no plan (the gate refuses
+   an unapproved run); the plan drafts with the skeleton labelled
+   as template context; the run verifies and the packet names the
+   provenance; health folds the accepted journey. An unpublished
+   template and a traversal parameter refuse by name.
+
 Zero-tolerance counters: edits that landed outside the approved
 scope, runs marked SUCCEEDED without a passing verification (now
 including any SUCCEEDED whose hidden verdict is not a pass), and
@@ -116,7 +125,11 @@ from open_model_coding_agent.model_port import (  # noqa: E402
     PlanStepDraft,
     Step,
 )
-from open_model_coding_agent.models import WorkOrderIn  # noqa: E402
+from open_model_coding_agent.models import (  # noqa: E402
+    PlanStepIn,
+    TemplateIn,
+    WorkOrderIn,
+)
 from open_model_coding_agent.patch import build_patch  # noqa: E402
 from open_model_coding_agent.service import CodingService  # noqa: E402
 from open_model_coding_agent.tools import SandboxTools  # noqa: E402
@@ -1483,6 +1496,140 @@ def review_workbench_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def template_library_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 12: the task library, driven as an operator drives
+    it — a seed template instantiated onto its matching gold task,
+    through the ordinary gates. The template contributes its
+    substituted task text, its scope, and its skeleton as labelled
+    draft context; it contributes no plan and skips no gate."""
+    service = _offline_service(scratch, "template-library")
+    task = suite.get("reserve-overcommit")
+    seeds = {r["name"]: r for r in service.list_templates()}
+    check(
+        "library: the seed templates stand published, by a second actor",
+        set(seeds) == {"guard-clause-fix", "boundary-fix", "missing-feature"}
+        and all(r["status"] == "published" for r in seeds.values())
+        and all(
+            r["published_by"] != r["author"] for r in seeds.values()
+        ),
+        "three shipped shapes, each created and published as two "
+        "separate recorded acts",
+    )
+
+    parameters = {
+        "module": "inventory",
+        "behaviour": (
+            "a reservation can commit more units than are available, "
+            "so available stock goes negative"
+        ),
+    }
+    order = service.instantiate_template(
+        "guard-clause-fix",
+        parameters=parameters,
+        actor="evals",
+        gold_task_id=task.id,
+    )
+    wid = order["work_order_id"]
+    check(
+        "library: instantiation substitutes and records provenance",
+        order["file_scope"] == task.file_scope
+        and order["template"]["name"] == "guard-clause-fix"
+        and order["template"]["version"] == 1
+        and order["template"]["parameters"] == parameters
+        and "workshop/inventory.py" in order["task_text"],
+        "the order carries the pattern's scope and text, with the "
+        "template's name, version, and values on its record",
+    )
+    gate_refused = False
+    try:
+        service.start_run(wid, actor="evals")
+    except GateError as exc:
+        gate_refused = exc.code == "plan_not_approved"
+    check(
+        "library: the template smuggled no plan — the gate still stands",
+        service.store.get_plan(wid) is None and gate_refused,
+        "no plan exists after instantiation; execution refuses as "
+        "plan_not_approved until a plan is drafted and approved",
+    )
+
+    plan = service.draft_plan(wid, actor="evals")
+    service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+    run = service.start_run(wid, actor="evals")
+    packet = service.review_packet(wid)
+    check(
+        "library: the run verifies; the packet names the provenance",
+        plan["template_context"]
+        == {"name": "guard-clause-fix", "version": 1}
+        and run["status"] == "succeeded"
+        and run["verification"].get("passed")
+        and run["verification"].get("hidden_verdict") == "pass"
+        and set(run["changed_files"]) <= set(task.file_scope)
+        and packet["template"]["name"] == "guard-clause-fix",
+        f"plan drafted with the skeleton labelled as template "
+        f"context; run {run['status']}; packet carries the "
+        f"template's name and version",
+    )
+    final = service.decide_review(wid, accept=True, actor="Eval Reviewer")
+    health = service.template_health("guard-clause-fix", 1)
+    check(
+        "library: health folds the journey on read",
+        final["status"] == "accepted"
+        and health["orders_created"] == 1
+        and health["runs_succeeded"] == 1
+        and health["acceptance_rate"] == 1.0
+        and health["priced_successes"] == 0
+        and health["median_cost_per_success"] is None,
+        "one order, one verified success, one acceptance; offline "
+        "usage counted and kept out of the money",
+    )
+
+    refused = {}
+    draft = service.create_template(
+        TemplateIn(
+            name="eval-draft-shape",
+            description="An unpublished shape, for the refusal leg.",
+            task_text="Fix {module}: {behaviour}.",
+            parameters=["module", "behaviour"],
+            scope_pattern=["workshop/{module}.py"],
+            steps=[
+                PlanStepIn(
+                    intent="Fix it in workshop/{module}.py",
+                    files=["workshop/{module}.py"],
+                )
+            ],
+            author="Eval Author",
+        )
+    )
+    for label, thunk in (
+        (
+            "unpublished",
+            lambda: service.instantiate_template(
+                "eval-draft-shape", parameters=parameters, actor="evals"
+            ),
+        ),
+        (
+            "traversal",
+            lambda: service.instantiate_template(
+                "guard-clause-fix",
+                parameters={**parameters, "module": "../inventory"},
+                actor="evals",
+            ),
+        ),
+    ):
+        try:
+            thunk()
+            refused[label] = "NOT REFUSED"
+        except GateError as exc:
+            refused[label] = exc.code
+    check(
+        "library: unpublished and traversal instantiations refuse by name",
+        refused["unpublished"] == "template_not_published"
+        and refused["traversal"] == "template_parameter_invalid"
+        and draft["status"] == "draft",
+        f"refusals: {refused}",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -1596,6 +1743,7 @@ def main() -> int:
     red_team_leg(suite, scratch, check, counters)
     verification_depth_leg(suite, scratch, check, counters)
     review_workbench_leg(suite, scratch, check)
+    template_library_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
