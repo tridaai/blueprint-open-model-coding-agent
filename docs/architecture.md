@@ -230,6 +230,16 @@ the verdict. A wrong-but-plausible repair therefore lands FAILED
 with the grading failure named — there is a test that proves exactly
 this.
 
+Since round 9 the grading run is also *isolated* from the tree it
+grades: pytest runs with `--noconftest` and the repo's `addopts`
+overridden, interpreter startup files (`sitecustomize.py`,
+`usercustomize.py`) are set aside in the verify copy and named on
+the verdict, and the verdict reads pytest's JUnit report — the
+grading counts (tests, failures, errors, skipped) are stored on
+the verdict as `grading_evidence`, and a pass requires every
+grading test to have actually run and passed. An exit code of
+zero over skipped or deselected tests is not a verdict.
+
 ## Failure recovery, precisely
 
 **Checkpoints.** As a run works, the shell records an append-only
@@ -497,19 +507,70 @@ recorded baseline. The console renders the latest comparison as
 that matrix beside the cost fold and the gate, with the same
 note attached.
 
+## The injection red team (round 9)
+
+**Repo content is data.** The agent reads the codebase it works
+on — comments, READMEs, docstrings, file names, test output — and
+every one of those is a channel an attacker who can plant a file
+in the target repo can write into. Round 9 attacks every channel
+with a model that has *already decided to obey* the injection,
+because a defence that works only when the model ignores planted
+text is not a defence. The full report is `docs/red-team.md`; the
+pack runs as `tests/test_red_team.py` and as a leg of the eval
+gate, graded zero-tolerance.
+
+Four of the six groups held by construction, and the pack proves
+each: instructions in repo content die at the tool port (scope,
+the one pytest shape, path resolution) whatever the model asks
+for; task text cannot widen a scope, skip the plan gate, or
+approve itself, because the gates are service state, not phrases;
+tool results claiming a verdict change nothing, because the
+verdict is computed on the pristine copy and a claim is not a
+patch; and a live model's plan draft passes the same validator as
+the scripted model's, refusing `malformed_plan` before anything
+is stored.
+
+Two groups landed, and both were fixed at the layer that owns
+the defect:
+
+- **Grading poisoning.** Verification took pytest's exit code as
+  its verdict, and a target-carried `conftest.py` could make that
+  code 0 without any grading test passing — by skipping the whole
+  set, or by patching the module under test before the grading
+  tests imported it; a root `sitecustomize.py` did the same
+  through interpreter startup. A grading run is now an *isolated*
+  run: `--noconftest`, the repo's `addopts` overridden away,
+  startup files set aside in the throwaway verify copy and named
+  on the verdict, and the verdict reads the JUnit **evidence** —
+  every grading test must actually run and pass (skipped = 0);
+  anything less reports `grading_not_fully_run`, not a pass.
+- **Symlink dereference.** Named access resolved links and
+  refused escapes, but enumeration did not: `search` read a
+  planted symlink's outside target into results the model sees,
+  `build_patch` read targets into diffs, and the service's tree
+  copies dereferenced links into the workspace and the pristine
+  snapshot. Symlinks are now followed nowhere: enumeration and
+  patch building skip them, and copies drop them at the copy
+  (`_copy_ignore`).
+
+What this round deliberately did not do: verification depth
+beyond proving the grading tests run (test-gaming is round 10),
+the challenge pass (round 13), and any change to promotion or
+comparison semantics.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
 staleness · R4 tool depth · R5 failure recovery · R6 budgets
-+ cost ledger · R7 model promotion gate · R8 shortlist comparison (this round) ·
-R9 injection red team · R10 verification depth · R11 review
++ cost ledger · R7 model promotion gate · R8 shortlist comparison ·
+R9 injection red team (this round) · R10 verification depth · R11 review
 workbench · R12 task library · R13 challenge pass · R14 batch work
 orders · R15 observability · R16 deployment profiles · R17 MCP
 surface · R18 dual control · R19 skills library · R20 release
 hardening (full gate re-run, live Postgres conformance, hosted boot,
 prod smoke).
 
-## Honest limits (round 8)
+## Honest limits (round 9)
 
 - The live Baseten adapter is built to Baseten's documented
   OpenAI-compatible shape and is exercised end to end in tests and
@@ -552,3 +613,13 @@ prod smoke).
   a full benchmark per live profile per comparison — that is the
   honest price of evidence over assertion, and the reason the
   comparison is a recorded act rather than a dashboard refresh.
+- The red team's grading isolation (round 9) proves the grading
+  tests *run* — unweakened collection, no repo conftest, evidence
+  counts on the verdict. It does not prove the tests are strong:
+  for an ad-hoc order the grading set is the operator's own tests
+  in the target repo, and a grading test that asserts nothing is
+  a test the operator chose. Test-gaming depth — a patch that
+  games tests which genuinely run — is round 10's subject. And
+  the pack attacks the shell with hostile scripted steps, not a
+  live model: whether a real model follows planted repo text is
+  that model's property, and no defence here depends on it.

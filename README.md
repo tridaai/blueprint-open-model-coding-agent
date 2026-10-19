@@ -130,7 +130,11 @@ make serve       # API + console on http://localhost:8000
    copy of the target and the task's grading tests run there. A run
    is SUCCEEDED only when the patch applies cleanly, stays in scope,
    and the grading tests pass on that fresh copy. The agent's own
-   in-run test results are never the verdict.
+   in-run test results are never the verdict. The grading run is
+   isolated from the repo it grades (round 9): no repo conftest, no
+   repo `addopts`, interpreter startup files set aside — and the
+   verdict reads pytest's JUnit evidence, so a grading test that
+   was skipped or deselected is not a pass.
 5. **Review gate.** A human accepts a verified run — the `.patch`
    file is exported to the run artifacts — or rejects it with a
    recorded reason. Nothing is applied to the source repo.
@@ -219,8 +223,8 @@ nothing is tuned against it.
 `make evals` grades all six end to end through the service, plus
 the construction proof, a gate check per task, and legs for the
 live adapter's code path, plan staleness, and plan amendments.
-Zero-tolerance counters: edits landed outside scope, and successes
-without a passing verification.
+Zero-tolerance counters: edits landed outside scope, successes
+without a passing verification, and injection effects landed.
 
 ## Layout
 
@@ -241,7 +245,7 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–8 are built and gated: **115 tests passing, evals PASS**
+Rounds 1–9 are built and gated: **134 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -256,7 +260,11 @@ rolls back, and refuses a regressed candidate, and a comparison
 leg where a throwaway shortlist — the offline profile, a copy,
 a priced fake-transport live profile, and a keyless live profile
 recorded not_servable with its reason — runs side by side over
-the held-out set and prints the folded matrix; counters at zero).
+the held-out set and prints the folded matrix, and a red-team leg
+where planted repo instructions obeyed by a hostile model, a
+skip-all conftest, self-approving task text, a fake verification
+transcript, path tricks, symlinks, and a hostile live plan draft
+land nothing; counters at zero).
 The default model profile is now earned, not configured: the gold
 suite is split tuning/held-out under content hashes, a profile is
 benchmarked through the real service path with the records
@@ -285,9 +293,19 @@ profile over the same set through the benchmark path, the
 keyless ones recorded not_servable with their reasons, and the
 report folded from the records — evidence with no ranking
 attached, because the promotion gate is the only path that
-changes the default. What is
+changes the default. The injection red team (round 9) then
+attacked the shell with hostile repos, hostile task text, and
+hostile plan drafts, driven by models that obey the injection —
+two attacks landed on the opening build: a target-carried
+conftest (or `sitecustomize.py`) could fake verification by
+keeping the grading tests from ever running, and symlinks in the
+target were dereferenced by search and by the tree copies. Both
+are fixed at the layer that owns them — grading now runs
+isolated, on JUnit evidence that every grading test ran, and
+symlinks are followed nowhere — and both are kept as
+regressions; the full report is `docs/red-team.md`. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: the injection red team (round 9). The Postgres
+`docs/architecture.md`: verification depth (round 10). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.
