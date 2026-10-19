@@ -48,10 +48,19 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read one file from the workspace.",
+            "description": (
+                "Read one file from the workspace, optionally a 1-based "
+                "line range (start_line/end_line). Large files come back "
+                "as a labelled head naming the file's true size; binary "
+                "files are refused by name."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                },
                 "required": ["path"],
             },
         },
@@ -60,10 +69,24 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "search",
-            "description": "Search the workspace's Python files for a regex pattern.",
+            "description": (
+                "Search workspace files for a regex pattern. Matches "
+                "return with line numbers and context. `glob` (default "
+                "*.py) and `path` (a file or directory) scope the "
+                "search inside the workspace; `case_sensitive` defaults "
+                "to true; `limit` caps the matches returned, and a "
+                "capped result says so with the true total."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"pattern": {"type": "string"}},
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "case_sensitive": {"type": "boolean"},
+                    "glob": {"type": "string"},
+                    "path": {"type": "string"},
+                    "limit": {"type": "integer"},
+                    "context": {"type": "integer"},
+                },
                 "required": ["pattern"],
             },
         },
@@ -73,9 +96,13 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "edit_file",
             "description": (
-                "Replace the text `old` with `new` in one file. `old` must "
-                "occur exactly once. The file must be inside the approved "
-                "file scope; the shell refuses anything outside it."
+                "Replace the anchor text `old` with `new` in one file — "
+                "the only way to change code. `old` must occur exactly "
+                "once: zero occurrences refuse as anchor_not_found, "
+                "several as anchor_ambiguous, and both refusals come "
+                "back as results you can act on (re-read, narrow the "
+                "anchor). The file must be inside the approved file "
+                "scope; the shell refuses anything outside it."
             ),
             "parameters": {
                 "type": "object",
@@ -94,12 +121,17 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "run_tests",
             "description": (
                 "Run pytest over named test files in the workspace — the "
-                "only command that exists. Non-test paths are refused."
+                "only command that exists. Non-test paths are refused. "
+                "With only_affected=true, the shell runs the affected "
+                "set it computes from the plan's steps and your edits "
+                "so far; `paths` then names a subset of that set (empty "
+                "means the whole set)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "paths": {"type": "array", "items": {"type": "string"}}
+                    "paths": {"type": "array", "items": {"type": "string"}},
+                    "only_affected": {"type": "boolean"},
                 },
                 "required": ["paths"],
             },
@@ -436,10 +468,10 @@ class BasetenModel(ModelPort):
             if not self._awaiting:
                 continue
             call_id = self._awaiting.pop(0)
-            content = (
-                f"ok={entry.get('ok')} refused={entry.get('refused', False)}\n"
-                f"{entry.get('output', '')}"
-            )
+            content = f"ok={entry.get('ok')} refused={entry.get('refused', False)}"
+            if entry.get("code"):
+                content += f" error={entry['code']}"
+            content += f"\n{entry.get('output', '')}"
             self._messages.append(
                 {"role": "tool", "tool_call_id": call_id, "content": content}
             )

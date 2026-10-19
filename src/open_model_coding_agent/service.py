@@ -17,7 +17,13 @@ reason recorded, rather than crashing the shell.
   (`plan_superseded`).
 - A run works on an isolated copy of the target repo. The model's
   steps pass through the tool port, where scope and command allowlists
-  are enforced in code. Every tool call is an audit record.
+  are enforced in code. Every tool call is an audit record, and the
+  record carries the tool's structured result verbatim — a refusal's
+  stable code, an edit's anchor and digests, a search's truncation
+  state — so the run's history shows not just what was asked but
+  exactly what the tools answered. The affected-test set a run may
+  ask for is computed by the tools from the plan's steps and the
+  run's actual edits; the model can request it, never define it.
 - The run's verdict is computed by the shell, never reported by the
   agent: the patch is applied to a fresh copy of the target and the
   grading tests run there. SUCCEEDED means exactly that the patch
@@ -488,6 +494,7 @@ class CodingService:
             workspace,
             scope=plan["files"],
             test_timeout=self.settings.policy.test_timeout_seconds,
+            plan_steps=plan.get("steps"),
         )
         transcript: list[dict] = []
         steps = 0
@@ -513,6 +520,7 @@ class CodingService:
                     "work_order", work_order_id, "tool_call", "agent",
                     run_id=run_id, tool=step.tool, ok=result.ok,
                     refused=result.refused, args=_summarise_args(step),
+                    result=result.as_dict(),
                 )
                 if result.refused and step.tool == "edit_file":
                     self._audit(
