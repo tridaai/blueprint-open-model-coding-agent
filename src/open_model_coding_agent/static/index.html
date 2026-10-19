@@ -153,17 +153,15 @@ async function showDetail(id) {
     html += `<div style="margin-top:10px">
       <button onclick="act('/api/work-orders/${id}/plan', null, '${id}')">Draft plan</button></div>`;
   }
-  if (plan) {
-    html += `<h3>Plan v${plan.version} (${esc(plan.status)})</h3>
-      <div>${esc(plan.approach)}</div>
-      <div class="muted">files: ${plan.files.map(esc).join(", ")} ·
-        tests: ${plan.tests.map(esc).join(", ")} · model: ${esc(plan.model_profile)}</div>`;
-    if (o.status === "plan_ready") {
+  const plans = (d.plans && d.plans.length) ? d.plans : (plan ? [plan] : []);
+  plans.slice().reverse().forEach((p, i) => {
+    html += planHtml(p, i === 0);
+    if (i === 0 && o.status === "plan_ready") {
       html += `<div style="margin-top:10px">
         <button onclick="decidePlan('${id}', true)">Approve plan</button>
         <button class="danger" onclick="decidePlan('${id}', false)">Reject plan</button></div>`;
     }
-  }
+  });
   if (o.status === "approved") {
     html += `<div style="margin-top:10px">
       <button onclick="act('/api/work-orders/${id}/runs', null, '${id}')">Run the agent</button></div>`;
@@ -190,6 +188,54 @@ async function showDetail(id) {
     (d.audit || []).map((a) => `${a.created_at}  ${a.event}  by ${a.actor}`).join("\n") +
     `</pre></div>`;
   $("detail").innerHTML = html;
+}
+
+function planHtml(p, isLatest) {
+  let html = `<h3>Plan v${p.version} (${esc(p.status)})${isLatest ? "" : " — superseded"}</h3>
+    <div>${esc(p.approach)}</div>`;
+  if ((p.steps || []).length) {
+    html += `<ol style="margin:8px 0 4px; padding-left:22px">` + p.steps.map((s) => `
+      <li><div>${esc(s.intent)}</div>
+        <div class="muted">files: ${(s.files || []).map(esc).join(", ") || "none"} ·
+          tests: ${(s.tests || []).map(esc).join(", ") || "none"}</div></li>`).join("") + `</ol>`;
+  }
+  html += `<div class="muted">scope: ${p.files.map(esc).join(", ")} ·
+    model: ${esc(p.model_profile)}</div>`;
+  if (p.scope_fingerprint) {
+    const state = p.fingerprint_state || "recorded";
+    const cls = state === "current" ? "ok" : (state === "stale" ? "bad" : "mid");
+    html += `<div class="muted">scope fingerprint: <span class="${cls}">${esc(state)}</span>
+      · ${esc(String(p.scope_fingerprint).slice(0, 12))}… (recorded at approval;
+      execution refuses a drifted repo as stale)</div>`;
+  } else {
+    html += `<div class="muted">scope fingerprint: unrecorded — it is recorded when this version is approved</div>`;
+  }
+  if (p.decided_by) {
+    html += `<div class="muted">decided by ${esc(p.decided_by)} at ${esc(p.decided_at || "")}` +
+      (p.decision_note ? ` — ${esc(p.decision_note)}` : "") + `</div>`;
+  }
+  const diff = p.diff_from_previous;
+  if (diff) {
+    const parts = [];
+    if (diff.steps_added.length) parts.push(`${diff.steps_added.length} step(s) added`);
+    if (diff.steps_removed.length) parts.push(`${diff.steps_removed.length} step(s) removed`);
+    if (diff.steps_changed.length) parts.push(`${diff.steps_changed.length} step(s) changed`);
+    if (diff.files_added.length) parts.push(`scope widened within the order: ${diff.files_added.map(esc).join(", ")}`);
+    if (diff.files_removed.length) parts.push(`scope narrowed: ${diff.files_removed.map(esc).join(", ")}`);
+    html += `<div style="margin-top:6px"><strong>Amendment of v${diff.from_version}</strong>` +
+      (p.amended_by ? ` by ${esc(p.amended_by)}` : "") +
+      (parts.length ? ` — ${parts.join(" · ")}` : " — no step changes") + `</div>`;
+    diff.steps_changed.forEach((c) => {
+      html += `<div class="muted">step changed: “${esc(c.before.intent)}” → “${esc(c.after.intent)}”</div>`;
+    });
+    diff.steps_added.forEach((s) => {
+      html += `<div class="muted">step added: “${esc(s.intent)}”</div>`;
+    });
+    diff.steps_removed.forEach((s) => {
+      html += `<div class="muted">step removed: “${esc(s.intent)}”</div>`;
+    });
+  }
+  return html;
 }
 
 async function decidePlan(id, approve) {
