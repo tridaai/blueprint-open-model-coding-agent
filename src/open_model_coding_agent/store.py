@@ -187,6 +187,16 @@ class SqlStore:
             )
         return json.loads(row["payload"]) if row else None
 
+    def list_plans(self, work_order_id: str) -> list[dict]:
+        """Every plan version for the order, oldest first. Plans are
+        versioned artifacts; the history is part of the record."""
+        rows = self._all(
+            f"SELECT payload FROM plans WHERE work_order_id = {self._ph} "
+            f"ORDER BY version",
+            (work_order_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
     # -- runs -------------------------------------------------------------
     def put_run(self, run: dict) -> None:
         payload = json.dumps(run)

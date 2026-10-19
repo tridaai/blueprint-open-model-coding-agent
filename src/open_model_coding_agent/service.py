@@ -37,6 +37,7 @@ from .logging_setup import log_event
 from .model_port import Step, make_model, validate_plan_draft
 from .models import Plan, PlanStep, Run, WorkOrder, WorkOrderIn
 from .patch import PatchError, apply_patch, build_patch
+from .plans import drifted_files, file_digests, scope_fingerprint
 from .store import SqlStore, utcnow
 from .tools import SandboxTools, dispatch
 
@@ -171,9 +172,14 @@ class CodingService:
         if order is None:
             return None
         runs = [self._attach_usage(r) for r in self.store.list_runs(work_order_id)]
+        plans = [
+            self._with_fingerprint_state(order, plan)
+            for plan in self.store.list_plans(work_order_id)
+        ]
         return {
             "work_order": order,
-            "plan": self.store.get_plan(work_order_id),
+            "plan": plans[-1] if plans else None,
+            "plans": plans,
             "runs": runs,
             "usage": self.store.list_usage(work_order_id=work_order_id),
             "audit": self.audit(work_order_id),
@@ -254,6 +260,27 @@ class CodingService:
         )
         return plan.model_dump()
 
+    def _scope_fingerprint(self, order: dict, plan: dict) -> tuple[str, dict]:
+        """The fingerprint of a plan's approved scope in the target
+        repo, and the per-file digests behind it — recomputed the
+        same way at approval and at execution, so the two compare."""
+        digests = file_digests(Path(order["target_path"]), list(plan["files"]))
+        fingerprint = scope_fingerprint(
+            task_text=order["task_text"], files=list(plan["files"]), digests=digests
+        )
+        return fingerprint, digests
+
+    def _with_fingerprint_state(self, order: dict, plan: dict) -> dict:
+        """A plan read carries its fingerprint state: ``unrecorded``
+        (never approved), ``current`` (the repo still matches the
+        world this version was approved against), or ``stale``."""
+        stored = plan.get("scope_fingerprint")
+        if not stored:
+            return {**plan, "fingerprint_state": "unrecorded"}
+        current, _digests = self._scope_fingerprint(order, plan)
+        state = "current" if current == stored else "stale"
+        return {**plan, "fingerprint_state": state}
+
     def decide_plan(
         self, work_order_id: str, *, approve: bool, actor: str, note: str | None = None
     ) -> dict:
@@ -269,25 +296,93 @@ class CodingService:
         plan["decided_by"] = actor
         plan["decided_at"] = utcnow()
         plan["decision_note"] = note
+        if approve:
+            # Approval binds this version to the world as it stands:
+            # the fingerprint execution will be checked against.
+            fingerprint, digests = self._scope_fingerprint(order, plan)
+            plan["scope_fingerprint"] = fingerprint
+            plan["scope_digests"] = digests
         self.store.put_plan(plan)
         self._set_status(order, "approved" if approve else "plan_rejected")
         self._audit(
             "work_order", work_order_id,
             "plan_approved" if approve else "plan_rejected", actor,
             version=plan["version"], note=note,
+            scope_fingerprint=plan.get("scope_fingerprint"),
         )
         return plan
 
     # -- runs ----------------------------------------------------------------
-    def start_run(self, work_order_id: str, actor: str = "console") -> dict:
+    def _refuse_if_stale(self, order: dict, plan: dict, actor: str) -> None:
+        """Execution starts only in the world the plan was approved
+        against. The fingerprint recorded at approval is recomputed
+        over the target repo; drift in any in-scope file — an edit,
+        a deletion — refuses the run as ``stale_plan``, names the
+        drifted files on the audit trail, and returns the order to
+        draft, from which a fresh plan can be drafted against the
+        repo as it now stands. Files outside the approved scope are
+        not in the fingerprint and can never stale a plan."""
+        stored = plan.get("scope_fingerprint")
+        if not stored:
+            drift: list[str] = []
+            message = (
+                f"execution refused: plan v{plan['version']} carries no scope "
+                f"fingerprint, so the world it was approved against cannot "
+                f"be verified"
+            )
+        else:
+            current, current_digests = self._scope_fingerprint(order, plan)
+            if current == stored:
+                return
+            drift = drifted_files(plan.get("scope_digests") or {}, current_digests)
+            message = (
+                f"execution refused: the target repo moved inside the "
+                f"approved scope since plan v{plan['version']} was approved "
+                f"(drifted: {', '.join(drift) or 'scope contents'}); draft a "
+                f"fresh plan against the repo as it now stands"
+            )
+        self._audit(
+            "work_order", order["work_order_id"], "stale_plan_refused", actor,
+            version=plan["version"], drifted_files=drift,
+            expected_fingerprint=stored,
+        )
+        self._set_status(order, "draft")
+        raise GateError("stale_plan", message)
+
+    def start_run(
+        self,
+        work_order_id: str,
+        actor: str = "console",
+        plan_version: int | None = None,
+    ) -> dict:
         order = self._require_order(work_order_id)
-        plan = self.store.get_plan(work_order_id)
+        plans = self.store.list_plans(work_order_id)
+        plan = plans[-1] if plans else None
+        if plan_version is not None:
+            named = next(
+                (p for p in plans if p["version"] == plan_version), None
+            )
+            if named is None:
+                raise GateError(
+                    "unknown_plan_version",
+                    f"work order {work_order_id} has no plan version "
+                    f"{plan_version}",
+                )
+            if plan is not None and plan_version != plan["version"]:
+                raise GateError(
+                    "plan_superseded",
+                    f"execution refused: plan v{plan_version} was superseded "
+                    f"by v{plan['version']}; execution runs the latest "
+                    f"approved version, and an approval recorded against "
+                    f"v{plan_version} does not authorise v{plan['version']}",
+                )
         if order["status"] != "approved" or plan is None or plan["status"] != "approved":
             raise GateError(
                 "plan_not_approved",
                 f"execution refused: work order {work_order_id} has no approved "
                 f"plan (status {order['status']})",
             )
+        self._refuse_if_stale(order, plan, actor)
         scripts: dict[str, list[dict]] = {}
         gold = self.gold.get(order["gold_task_id"]) if order.get("gold_task_id") else None
         if gold is not None:
