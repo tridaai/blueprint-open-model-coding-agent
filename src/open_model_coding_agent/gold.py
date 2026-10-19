@@ -13,6 +13,18 @@ model's edits, the way a real model's knowledge would.
 Each task also carries its plan steps — the step list a competent
 plan for the task has — which are part of the construction too.
 
+Since round 10 each task also carries a *hidden* grading file
+(``evals/gold/hidden/<task>/``): a second grading set asserting
+behaviour the visible tests imply but do not state (edge cases of
+the same fix, on inputs the visible set never uses). It lives only
+in the eval area. The shell stages it solely at hidden re-grade
+time — into the verification copy, after the visible set has
+passed — never into a run workspace and never alongside the
+visible grading staging. Gold-by-construction applies to it
+exactly as to the visible set: it fails on the broken state and
+passes on the reference fix, proved by the eval runner's per-task
+hidden leg.
+
 :meth:`GoldSuite.check_construction` proves the construction: every
 scripted edit's anchor occurs exactly once in the broken file,
 applying the edits reproduces the fixed file byte for byte, and the
@@ -37,6 +49,7 @@ class GoldTask:
         self.task_text: str = spec["task_text"]
         self.file_scope: list[str] = spec["file_scope"]
         self.grading_file: str = spec["grading_file"]
+        self.hidden_grading_file: str = spec.get("hidden_grading_file", "")
         self.plan_approach: str = spec["plan_approach"]
         self.plan_steps: list[dict] = spec.get("plan_steps", [])
         self.scripted_edits: list[dict] = spec["scripted_edits"]
@@ -95,6 +108,43 @@ class GoldTask:
     def grading_relpath(self) -> str:
         return f"grading/{self.grading_file}"
 
+    def hidden_grading_source(self) -> str:
+        return (
+            self.root / "hidden" / self.id / self.hidden_grading_file
+        ).read_text()
+
+    def hidden_grading_relpath(self) -> str:
+        return f"hidden_grading/{self.hidden_grading_file}"
+
+    def _check_hidden_grading(self) -> list[str]:
+        """The hidden grading set is part of the construction too:
+        the task must name one, the file must exist in the eval
+        area's hidden tree, and it must not simply be the visible
+        grading file under another name."""
+        if not self.hidden_grading_file:
+            return [f"{self.id}: the task names no hidden grading file"]
+        if not self.hidden_grading_file.startswith("test_hidden_"):
+            return [
+                f"{self.id}: hidden grading file "
+                f"{self.hidden_grading_file!r} does not carry the "
+                f"test_hidden_ name that marks the hidden set"
+            ]
+        try:
+            source = self.hidden_grading_source()
+        except OSError:
+            return [
+                f"{self.id}: hidden grading file "
+                f"{self.hidden_grading_file!r} is missing from "
+                f"evals/gold/hidden/{self.id}/"
+            ]
+        if source == self.grading_source():
+            return [
+                f"{self.id}: the hidden grading file is byte-identical "
+                f"to the visible one — a re-grade against the same "
+                f"tests proves nothing"
+            ]
+        return []
+
     # -- construction proof ---------------------------------------------
     def check_construction(self) -> list[str]:
         """Return a list of construction errors (empty = sound)."""
@@ -108,6 +158,7 @@ class GoldTask:
             )
             return problems
         problems.extend(self._check_plan_steps())
+        problems.extend(self._check_hidden_grading())
         for edit in self.scripted_edits:
             path = edit["path"]
             if path not in broken:

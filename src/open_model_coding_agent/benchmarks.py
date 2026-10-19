@@ -18,8 +18,10 @@ silently grade a subset.
 
 Comparability is enforced by content, not by name. Each set carries
 a **content hash** — SHA-256 over a canonical manifest of its
-tasks: the task specs, the broken and fixed overlays, and the
-grading tests. Add a task, edit a defect, touch a grading test,
+tasks: the task specs, the broken and fixed overlays, the grading
+tests, and (since round 10) the hidden grading tests — a run's
+verdict now depends on both sets, so both are part of what the
+hash names. Add a task, edit a defect, touch a grading test,
 and the hash moves; a benchmark or evaluation recorded under the
 old hash no longer describes the set that exists now, and the
 promotion gate refuses it as ``evaluation_stale``. Re-running the
@@ -117,6 +119,8 @@ def task_set_hash(suite: GoldSuite, set_name: str) -> str:
                 },
                 "grading_file": task.grading_file,
                 "grading": _sha256(task.grading_source()),
+                "hidden_grading_file": task.hidden_grading_file,
+                "hidden_grading": _sha256(task.hidden_grading_source()),
             }
         )
     canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
