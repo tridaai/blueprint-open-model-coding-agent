@@ -66,7 +66,9 @@ def test_a_wrong_repair_fails_verification(service, approved_order, monkeypatch)
     monkeypatch.setattr(
         service_module,
         "make_model",
-        lambda profile_id, scripts=None: OfflineScriptedModel(scripts=bad_script),
+        lambda profile_id, scripts=None, **_kw: OfflineScriptedModel(
+            scripts=bad_script
+        ),
     )
     run = service.start_run(wid)
     assert run["status"] == "failed"

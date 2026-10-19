@@ -7,8 +7,7 @@ from fastapi.testclient import TestClient
 
 from open_model_coding_agent.api import create_app
 from open_model_coding_agent.config import load_profile, load_settings
-from open_model_coding_agent.errors import ConfigError, GateError
-from open_model_coding_agent.service import CodingService
+from open_model_coding_agent.errors import ConfigError
 from open_model_coding_agent.store import SqlStore
 
 
@@ -40,25 +39,26 @@ def test_unknown_profile_refused_loudly():
 
 
 def test_baseten_profile_shape():
-    profile = load_profile("baseten")
+    profile = load_profile("baseten-glm")
     assert profile.base_url == "https://inference.baseten.co/v1"
     assert profile.api_key_env == "BASETEN_API_KEY"
     assert profile.model == "zai-org/GLM-5"
+    assert profile.version == 1
 
 
-def test_baseten_run_refuses_until_round_2(tmp_path):
-    settings = load_settings(
-        sqlite_path=str(tmp_path / "db.sqlite"),
-        targets_dir=tmp_path / "targets",
-        runs_dir=tmp_path / "runs",
-        artifacts_dir=tmp_path / "artifacts",
-        model_profile="baseten",
-    )
-    service = CodingService(settings)
-    order = service.create_gold_work_order("reserve-overcommit")
-    with pytest.raises(GateError) as exc:
-        service.draft_plan(order["work_order_id"])
-    assert exc.value.code == "live_model_not_available"
+def test_live_profile_without_key_refuses_at_startup(tmp_path, monkeypatch):
+    """A live profile selected without its key is a startup refusal,
+    by name — never a silent fall back to the offline stand-in."""
+    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
+    with pytest.raises(ConfigError) as exc:
+        load_settings(
+            sqlite_path=str(tmp_path / "db.sqlite"),
+            targets_dir=tmp_path / "targets",
+            runs_dir=tmp_path / "runs",
+            artifacts_dir=tmp_path / "artifacts",
+            model_profile="baseten-glm",
+        )
+    assert "BASETEN_API_KEY" in str(exc.value)
 
 
 def test_api_flow(settings):

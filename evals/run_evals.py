@@ -1,6 +1,8 @@
-"""Eval gate v1: the gold task suite, graded end to end.
+"""Eval gate: the gold task suite, graded end to end.
 
-Three layers, all offline (the labelled scripted model):
+Three layers on the offline model (the labelled scripted model),
+plus a fourth — the live path's code — driven through a fake
+transport replaying recorded-shape responses (no network, no key):
 
 1. CONSTRUCTION — the suite is gold-by-construction: scripted-edit
    anchors occur exactly once in each broken file, and applying the
@@ -20,6 +22,8 @@ scope, and runs marked SUCCEEDED without a passing verification.
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import sys
 import tempfile
@@ -28,6 +32,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from open_model_coding_agent.baseten import HttpResponse  # noqa: E402
 from open_model_coding_agent.config import load_settings  # noqa: E402
 from open_model_coding_agent.errors import GateError  # noqa: E402
 from open_model_coding_agent.gold import GoldSuite  # noqa: E402
@@ -51,6 +56,108 @@ def grade_tree(suite: GoldSuite, task, *, fixed: bool, scratch: Path) -> bool:
     staged.write_text(task.grading_source())
     tools = SandboxTools(tree, scope=[], test_timeout=120)
     return tools.run_tests([task.grading_relpath()]).ok
+
+
+class _FakeTransport:
+    """Replays recorded-shape Chat Completions responses. The live
+    adapter's code path runs end to end; the network never does."""
+
+    def __init__(self, script):
+        self.script = list(script)
+
+    def post(self, url, *, headers, json_body, timeout):
+        return self.script.pop(0)
+
+
+def _chat(content=None, tool_calls=None):
+    message: dict = {"role": "assistant", "content": content}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    body = {
+        "choices": [{"message": message}],
+        "usage": {"prompt_tokens": 120, "completion_tokens": 40, "total_tokens": 160},
+    }
+    return HttpResponse(200, json.dumps(body))
+
+
+def _tool_call(call_id, name, args):
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(args)},
+    }
+
+
+def live_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """One gold task through the Baseten adapter's code path: plan
+    over the wire shape, tool calls back, verification in code, and
+    the provider's usage recorded against the run."""
+    task = suite.get("reserve-overcommit")
+    calls = [_tool_call("c-read", "read_file", {"path": task.file_scope[0]})]
+    for index, edit in enumerate(task.scripted_edits):
+        calls.append(
+            _tool_call(
+                f"c-edit-{index}",
+                "edit_file",
+                {"path": edit["path"], "old": edit["old"], "new": edit["new"]},
+            )
+        )
+    script = [
+        _chat(
+            content=json.dumps(
+                {
+                    "approach": task.plan_approach,
+                    "files": list(task.file_scope),
+                    "tests": [],
+                }
+            )
+        ),
+        _chat(tool_calls=calls),
+        _chat(content="the repair is complete"),
+    ]
+    # A placeholder key for the leg's duration: the fake transport
+    # means it is never sent anywhere, but the live profile rightly
+    # refuses to build its adapter without one present.
+    os.environ["BASETEN_API_KEY"] = "eval-fake-key"
+    try:
+        settings = load_settings(
+            sqlite_path=str(scratch / "live" / "codingagent.db"),
+            targets_dir=scratch / "live" / "targets",
+            runs_dir=scratch / "live" / "runs",
+            artifacts_dir=scratch / "live" / "artifacts",
+            model_profile="baseten-glm",
+        )
+        settings.model_transport = _FakeTransport(script)
+        service = CodingService(settings)
+        order = service.create_gold_work_order(task.id, actor="evals")
+        wid = order["work_order_id"]
+        plan = service.draft_plan(wid, actor="evals")
+        check(
+            "live path: plan drafted by the adapter",
+            plan["model_profile"] == "baseten-glm"
+            and plan["files"] == task.file_scope,
+            f"profile {plan['model_profile']}; files {plan['files']}",
+        )
+        service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+        run = service.start_run(wid, actor="evals")
+    finally:
+        del os.environ["BASETEN_API_KEY"]
+    check(
+        "live path: run verified",
+        run["status"] == "succeeded" and run["verification"].get("passed"),
+        f"run {run['status']}; {run['verification'].get('reason')}",
+    )
+    usage = service.store.list_usage(work_order_id=wid)
+    api_rows = [u for u in usage if u["source"] == "api"]
+    run_rows = [u for u in api_rows if u["run_id"] == run["run_id"]]
+    check(
+        "live path: usage recorded from the API shape",
+        len(api_rows) == len(usage) and len(run_rows) >= 2
+        and all(u["model"] == "zai-org/GLM-5" for u in api_rows)
+        and run["usage_totals"]["prompt_tokens"] > 0,
+        f"{len(api_rows)} api calls recorded ({len(run_rows)} on the run), "
+        f"all under zai-org/GLM-5",
+    )
 
 
 def main() -> int:
@@ -128,6 +235,8 @@ def main() -> int:
             and len(run["patch"]) > 0,
             f"final status {final['status']}; artifact {artifact.name}",
         )
+
+    live_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
