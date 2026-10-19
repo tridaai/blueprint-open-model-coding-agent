@@ -72,6 +72,16 @@ recorded-shape responses (no network, no key):
    unplanned file are each refused by name at verification; and a
    whitespace-only patch is named no_substantive_change.
 
+12. REVIEW WORKBENCH (round 11) — a workbench leg driving one
+   order through the reviewer's whole journey on the packet reads:
+   a verified run lands in the derived queue as awaiting review;
+   the packet assembles the decision's evidence; the reviewer
+   rejects, then reverses the rejection into a request-changes
+   send-back whose note is stored on the order; a new plan drafts
+   against the note and a new run succeeds; the re-review packet
+   names what changed (plan version, verdicts); and the reviewer
+   accepts. Reviewer history folds the leg's decisions by actor.
+
 Zero-tolerance counters: edits that landed outside the approved
 scope, runs marked SUCCEEDED without a passing verification (now
 including any SUCCEEDED whose hidden verdict is not a pass), and
@@ -1368,6 +1378,111 @@ def verification_depth_leg(suite: GoldSuite, scratch: Path, check, counters) -> 
     )
 
 
+def review_workbench_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 11: the review workbench, driven as a reviewer drives
+    it — off the queue and packet reads, never the detail view's
+    internals. One order goes the whole journey: verified run,
+    rejection, the rejection reversed into a request-changes
+    send-back, a new plan drafted against the stored note, a new
+    run, a re-review packet that names what changed, acceptance."""
+    service = _offline_service(scratch, "review-workbench")
+    task = suite.get("reserve-overcommit")
+    order = service.create_gold_work_order(task.id, actor="evals")
+    wid = order["work_order_id"]
+
+    service.draft_plan(wid, actor="evals")
+    queue = service.review_queue()
+    check(
+        "workbench: the undecided plan waits in the derived queue",
+        [e["work_order_id"] for e in queue["entries"]] == [wid]
+        and queue["entries"][0]["category"] == "plan_awaiting_approval"
+        and queue["entries"][0]["next_act"] == "decide_plan",
+        "one entry, naming the plan decision as its next act",
+    )
+    service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+    first = service.start_run(wid, actor="evals")
+    queue = service.review_queue()
+    check(
+        "workbench: the verified run waits for review, flags and all",
+        [e["work_order_id"] for e in queue["entries"]] == [wid]
+        and queue["entries"][0]["category"] == "awaiting_review"
+        and queue["entries"][0]["next_act"] == "review"
+        and queue["entries"][0]["risk_flags"]["hidden_verdict"] == "pass"
+        and queue["entries"][0]["age_seconds"] is not None,
+        f"run {first['run_id']} stands in the queue as awaiting review",
+    )
+    packet = service.review_packet(wid)
+    check(
+        "workbench: the packet assembles the whole decision",
+        packet["plan"]["version"] == 1
+        and packet["patch"] == first["patch"]
+        and packet["verification"]["passed"] is True
+        and packet["risk_flags"]["test_surface_touched"] is False
+        and packet["risk_flags"]["hidden_verdict_absent"] is False
+        and packet["cost"] is not None
+        and packet["review_decisions"] == []
+        and packet["changes_since_previous"] is None,
+        "task, plan, patch + shape, verdicts, usage and cost, no "
+        "prior decisions, nothing to diff against yet",
+    )
+
+    # Reject, then reverse the rejection into a send-back: the
+    # request-changes decision stands on the succeeded run, stores
+    # its note on the order, and returns it to a draftable state.
+    service.decide_review(
+        wid, accept=False, actor="Eval Reviewer", reason="not this shape"
+    )
+    sent_back = service.decide_review(
+        wid,
+        actor="Eval Reviewer",
+        decision="request_changes",
+        reason="keep the guard, name the boundary case in the approach",
+    )
+    check(
+        "workbench: request changes reverses a rejection, note stored",
+        sent_back["status"] == "changes_requested"
+        and sent_back["review_note"]
+        == "keep the guard, name the boundary case in the approach"
+        and service.review_queue()["count"] == 0,
+        "the order leaves the queue standing at changes_requested, "
+        "the note on its record",
+    )
+    plan = service.draft_plan(wid, actor="evals")
+    service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+    second = service.start_run(wid, actor="evals")
+    packet = service.review_packet(wid)
+    changes = packet["changes_since_previous"] or {}
+    check(
+        "workbench: the re-review packet names what changed",
+        plan["version"] == 2
+        and second["status"] == "succeeded"
+        and [d["kind"] for d in packet["review_decisions"]]
+        == ["rejected", "changes_requested"]
+        and changes.get("previous_run_id") == first["run_id"]
+        and changes.get("plan_version") == {"before": 1, "now": 2}
+        and changes.get("verdicts", {}).get("hidden")
+        == {"before": "pass", "now": "pass"},
+        f"plan v1 -> v2, decisions "
+        f"{[d['kind'] for d in packet['review_decisions']]} on record",
+    )
+    final = service.decide_review(wid, accept=True, actor="Eval Reviewer")
+    history = service.reviewer_history()
+    reviewer = next(
+        r for r in history["reviewers"] if r["actor"] == "Eval Reviewer"
+    )
+    check(
+        "workbench: acceptance lands; history folds the journey",
+        final["status"] == "accepted"
+        and reviewer["decisions"] == 3
+        and reviewer["rejected"] == 1
+        and reviewer["changes_requested"] == 1
+        and reviewer["accepted"] == 1
+        and reviewer["work_orders"] == [wid]
+        and reviewer["median_time_to_decision_seconds"] is not None,
+        "three recorded decisions by one actor, folded on read",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -1480,6 +1595,7 @@ def main() -> int:
     comparison_leg(suite, scratch, check)
     red_team_leg(suite, scratch, check, counters)
     verification_depth_leg(suite, scratch, check, counters)
+    review_workbench_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
