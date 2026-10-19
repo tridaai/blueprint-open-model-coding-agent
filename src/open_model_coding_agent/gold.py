@@ -10,9 +10,14 @@ workspace: the shell stages grading tests only into the verification
 copy, and the reference fix reaches a run only as the scripted
 model's edits, the way a real model's knowledge would.
 
+Each task also carries its plan steps — the step list a competent
+plan for the task has — which are part of the construction too.
+
 :meth:`GoldSuite.check_construction` proves the construction: every
 scripted edit's anchor occurs exactly once in the broken file,
-applying the edits reproduces the fixed file byte for byte.
+applying the edits reproduces the fixed file byte for byte, and the
+plan steps cover exactly the file scope and name the task's own
+grading tests.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ class GoldTask:
         self.file_scope: list[str] = spec["file_scope"]
         self.grading_file: str = spec["grading_file"]
         self.plan_approach: str = spec["plan_approach"]
+        self.plan_steps: list[dict] = spec.get("plan_steps", [])
         self.scripted_edits: list[dict] = spec["scripted_edits"]
 
     # -- overlay access -------------------------------------------------
@@ -49,6 +55,39 @@ class GoldTask:
 
     def fixed_files(self) -> dict[str, str]:
         return self._overlay("fixed")
+
+    def _check_plan_steps(self) -> list[str]:
+        """The task's plan steps are part of its construction: they
+        must cover exactly the file scope, name only in-scope files,
+        carry an intent each, and name this task's grading tests —
+        the tests the suite will actually grade with."""
+        problems: list[str] = []
+        if not self.plan_steps:
+            return [f"{self.id}: the task carries no plan steps"]
+        covered: set[str] = set()
+        for index, step in enumerate(self.plan_steps):
+            label = f"{self.id}: plan step {index + 1}"
+            if not str(step.get("intent") or "").strip():
+                problems.append(f"{label} has no intent")
+            files = step.get("files") or []
+            if not files:
+                problems.append(f"{label} names no files")
+            outside = [f for f in files if f not in self.file_scope]
+            if outside:
+                problems.append(f"{label} names files outside the scope: {outside}")
+            covered.update(files)
+            for named in step.get("tests") or []:
+                if named != self.grading_relpath():
+                    problems.append(
+                        f"{label} names test {named!r}, which is not this "
+                        f"task's grading test ({self.grading_relpath()})"
+                    )
+        if covered != set(self.file_scope):
+            problems.append(
+                f"{self.id}: plan steps cover {sorted(covered)}, "
+                f"not the file scope {sorted(self.file_scope)}"
+            )
+        return problems
 
     def grading_source(self) -> str:
         return (self.root / "grading" / self.id / self.grading_file).read_text()
@@ -68,6 +107,7 @@ class GoldTask:
                 f"{sorted(broken)} vs {sorted(fixed)}"
             )
             return problems
+        problems.extend(self._check_plan_steps())
         for edit in self.scripted_edits:
             path = edit["path"]
             if path not in broken:
