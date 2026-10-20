@@ -2316,6 +2316,124 @@ def mcp_surface_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def dual_control_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 18: dual control, driven as the hosted deployment
+    drives it — a deployment record that requires it (written
+    here, as governed data, permissive in every other rule so
+    the leg runs offline), one gold task carried to a verified
+    run, and the acceptance taken through its two decisions:
+    the requester is excluded by name, the first reviewer's
+    decision parks the act with the patch unexported, the same
+    reviewer again refuses by name, a stranger cannot withdraw
+    what is not theirs, and a second, different reviewer
+    completes the act — the patch exported, both deciders on
+    the record."""
+    leg = scratch / "dual-control"
+    dep_dir = leg / "deployments"
+    dep_dir.mkdir(parents=True, exist_ok=True)
+    (dep_dir / "dual-required.json").write_text(json.dumps({
+        "name": "dual-required",
+        "label": "Dual control required (eval record)",
+        "version": 1,
+        "description": (
+            "The evals' own deployment record: permissive in "
+            "every rule except dual control, which it requires — "
+            "the hosted shape's gate behaviour, exercised "
+            "offline."
+        ),
+        "rules": {
+            "model": "any",
+            "store": "any",
+            "api_key": "profile",
+            "endpoint": "any",
+            "dual_control": "required",
+        },
+    }))
+    settings = load_settings(
+        sqlite_path=str(leg / "codingagent.db"),
+        targets_dir=leg / "targets",
+        runs_dir=leg / "runs",
+        artifacts_dir=leg / "artifacts",
+        deployment_profile="dual-required",
+        deployment_profiles_dir=dep_dir,
+    )
+    service = CodingService(settings)
+    task = suite.get("reserve-overcommit")
+    order = service.create_gold_work_order(task.id, actor="Eval Requester")
+    wid = order["work_order_id"]
+    service.draft_plan(wid, actor="Eval Requester")
+    service.decide_plan(wid, approve=True, actor="Eval Approver")
+    run = service.start_run(wid, actor="Eval Requester")
+    artifact = settings.artifacts_dir / f"{wid}.patch"
+
+    def refusal_code(fn) -> str | None:
+        try:
+            fn()
+        except GateError as exc:
+            return exc.code
+        return None
+
+    excluded = refusal_code(
+        lambda: service.decide_review(
+            wid, accept=True, actor="Eval Requester"
+        )
+    )
+    parked = service.decide_review(wid, accept=True, actor="Reviewer One")
+    queue = service.review_queue()
+    entry = next(
+        e for e in queue["entries"] if e["work_order_id"] == wid
+    )
+    check(
+        "dual control: the requester is excluded and the first acceptance parks",
+        excluded == "dual_control_excluded_actor"
+        and run["status"] == "succeeded"
+        and parked["status"] == "awaiting_second_acceptance"
+        and not artifact.exists()
+        and entry["category"] == "awaiting_second_acceptance"
+        and entry["next_act"] == "review"
+        and entry["first_actor"] == "Reviewer One",
+        "one decision recorded, the order parked in its named "
+        "state, the patch unexported, the queue naming the wait",
+    )
+    same_actor = refusal_code(
+        lambda: service.decide_review(
+            wid, accept=True, actor=" reviewer one "
+        )
+    )
+    stranger_withdraw = refusal_code(
+        lambda: service.withdraw_review_acceptance(
+            wid, actor="Reviewer Two"
+        )
+    )
+    withdrawn = service.withdraw_review_acceptance(
+        wid, actor="Reviewer One"
+    )
+    check(
+        "dual control: same actor refuses, a stranger cannot withdraw, the decider can",
+        same_actor == "dual_control_same_actor"
+        and stranger_withdraw == "dual_control_not_the_decider"
+        and withdrawn["status"] == "succeeded"
+        and not artifact.exists(),
+        "the parked act returned to undecided by its own "
+        "decider alone, the withdrawal on record",
+    )
+    service.decide_review(wid, accept=True, actor="Reviewer One")
+    done = service.decide_review(wid, accept=True, actor="Reviewer Two")
+    packet = service.review_packet(wid)
+    check(
+        "dual control: the second, distinct decision completes the act",
+        done["status"] == "accepted"
+        and artifact.exists()
+        and artifact.read_text() == run["patch"]
+        and packet["dual_control"]["acceptance"] is None
+        and service.operations_digest()["dual_control"][
+            "acceptances_parked"
+        ] == 2,
+        "patch exported only on the second decision; both "
+        "decisions stand on the order's record",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -2451,6 +2569,7 @@ def main() -> int:
     observability_leg(suite, scratch, check)
     deployment_profiles_leg(suite, scratch, check)
     mcp_surface_leg(suite, scratch, check)
+    dual_control_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")

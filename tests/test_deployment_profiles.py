@@ -67,6 +67,7 @@ def _record(**overrides):
             "store": "any",
             "api_key": "profile",
             "endpoint": "any",
+            "dual_control": "off",
         },
     }
     record.update(overrides)
@@ -91,11 +92,16 @@ def test_the_shipped_profiles_load_with_their_rules():
         "store": "any",
         "api_key": "profile",
         "endpoint": "any",
+        "dual_control": "off",
     }
     assert profiles["hosted"].rules["model"] == "live"
     assert profiles["hosted"].rules["store"] == "postgres"
     assert profiles["hosted"].rules["api_key"] == "required"
     assert profiles["hosted-self"].rules["endpoint"] == "not_baseten"
+    # Round 18: dual control is a deployment rule like the others —
+    # required under both production shapes, off under local.
+    assert profiles["hosted"].rules["dual_control"] == "required"
+    assert profiles["hosted-self"].rules["dual_control"] == "required"
     for profile in profiles.values():
         assert profile.version >= 1
         # The content hash is the file's SHA-256: 64 hex chars,
@@ -312,14 +318,18 @@ def test_readiness_reports_the_deployment_profile_and_its_rules(settings):
     assert readiness["deployment_profile_hash"] == local.content_hash
     assert readiness["status"] == "ready"
     rules = {state["rule"]: state for state in readiness["deployment_rules"]}
-    assert set(rules) == {"model", "store", "api_key", "endpoint"}
+    assert set(rules) == {
+        "model", "store", "api_key", "endpoint", "dual_control",
+    }
     assert all(state["state"] == "satisfied" for state in rules.values())
 
 
 def test_the_digest_names_the_deployment_profile(service):
     digest = service.operations_digest()
     assert digest["deployment_profile"] == "local"
-    assert digest["deployment_profile_version"] == 1
+    # The record's version as shipped (round 18 took it to v2 when
+    # the dual_control rule joined the vocabulary).
+    assert digest["deployment_profile_version"] == 2
 
 
 def test_a_run_record_is_stamped_with_its_deployment_profile(service, approved_order):
