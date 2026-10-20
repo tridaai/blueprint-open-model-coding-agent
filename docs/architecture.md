@@ -1413,6 +1413,121 @@ decision-shaped call is refused there exactly as before.
 Actors remain recorded names, not authenticated identities —
 the shell's standing limit, stated once here as everywhere.
 
+## The skills library (round 19)
+
+**A skill is governed content: a named method, versioned like
+everything else this shell trusts.** A skill is an instruction
+pack for the planning and execution context — a way of working
+("test-first repair", "minimal-diff discipline",
+"read-the-callers-first") rather than a shape of task. It lives
+as files: one Markdown file per version at
+`skills/<name>/v<N>.md`, under a small index (`skills/index.json`)
+naming every skill, every version it carries, the version's
+author, and the SHA-256 **content hash** of its file. The loader
+(`skills.py`) validates the index against the files fail-closed,
+in the price table's mould: an unknown field, a version the
+index does not carry, a file the layout does not name, or a
+content hash that no longer matches the file refuses at startup
+by name. Authoring is a file act — the `write_skill` helper
+writes the next version's file and its index entry together, so
+the two never disagree — and a deployment authors skills the
+way it publishes a new price-table version: as governed data,
+reviewed as data. Three seed skills ship in the library,
+standing recorded and unpublished.
+
+**Mounting is explicit, recorded, and resolved at draft time.**
+A work order names its mounts — a skill, and optionally a
+version — on its record at intake, exactly as requested. At
+drafting, the service resolves each mount against the library
+and the publication fold: an explicit version names its text;
+an omitted one resolves to the latest published version; an
+unknown name or version refuses by name, and so does a version
+that does not stand published. The resolved text enters the
+model's context under its own labelled section — the live
+adapter prints it in the planning prompt and again in the
+execution context, each skill headed by its name, version, and
+content hash; the scripted model accounts for it in what it was
+shown — and the **plan record stamps** each mount (name,
+version, content hash). The stamp is the citation: a run of
+that plan resolves its skill text from the stamps, and if the
+library's text for a stamped version no longer hashes to the
+stamp, the launch refuses as `skill_content_drifted` — the same
+discipline as the plan's scope fingerprint, applied to the
+words the plan was drafted under. An amendment carries the
+superseded version's stamps unchanged; the mounts are the
+order's standing request, re-resolved at its next fresh draft.
+
+**Publication is eval-gated — the promotion gate's discipline,
+pointed at method instead of models.** A version becomes
+publishable only with a **benchmark evaluation of its exact
+content hash**: paired passes over the gold **tuning** split
+through the real benchmark path — each pass runs every tuning
+task twice, once unmounted (the baseline) and once with the
+candidate mounted — scored by the worst pass on each side, with
+a zero-tolerance count of the gate's violations (an
+out-of-scope edit, a success without verification) among the
+mounted runs. The comparison is paired on purpose: candidate
+and baseline are measured in the same act, on the same split,
+under the same serving profile, so a skill is never judged
+against a baseline from another day. The publish act then
+refuses by name: no evaluation for the version, or the latest
+did not pass (`no_passing_evaluation`); the latest evaluation
+judged different text (`evaluation_stale`); the publisher is
+the version's author (`skill_self_publish`); the publisher
+recorded the evaluation (`skill_evaluator_publish`); or the
+candidate's worst regressed below its paired baseline
+(`regression`). One exception stands, stated plainly: the
+evaluation's own orders carry the mark `skills_under_evaluation`,
+settable only by the evaluation path itself — never at any
+intake surface — because measuring an unpublished candidate is
+the act the gate judges by; those orders are ordinary orders in
+every other respect, and their plans carry the candidate's
+stamp like any mount. **Rollback** appends an event
+un-publishing the latest published version, so resolution
+returns to the previous published version; it refuses when
+nothing stands published, and when the latest published version
+is the only one — a rollback never leaves a skill silently
+unmountable. Standing is a fold over the events, never a status
+edited in place. Dual control (round 18) does not cover skill
+publication: its two acts are acceptance and model promotion,
+and the rule vocabulary is where a third act would join.
+
+**A skill is data, never code.** Mounted text can inform a
+plan; it cannot widen scope, skip a gate, or add a tool. The
+planning prompt frames it so, and the framing is not the
+defence: the defence is that nothing downstream reads it as
+anything but context. The shared plan validator binds a mounted
+draft exactly as it binds any other — a skill whose text urges
+an out-of-scope edit produces a draft that refuses as
+`malformed_plan` when its steps name the file, as the eval leg
+and the test suite both prove — the tool port's scope and the
+verification verdict are computed from the order and the plan,
+never from the skill. The evaluation's zero-tolerance count is
+the same posture at the gate: a skill whose mounted runs land
+an out-of-scope edit cannot publish, whatever its prose claims.
+
+**Health is a fold, like everything else here.**
+`skill_health` derives a version's standing on read from the
+plans that stamped it: orders and plans mounted, the runs those
+plans produced by status, failures by the workbench's classes,
+the verified success rate over mounted runs, and the median
+priced cost of a verified success over the successes the price
+table actually priced. The operator digest folds mounted-skill
+usage the same way — plans drafted with mounts, counted by
+skill and version, from the plan records' stamps. Nothing is
+stored, so both folds can be re-derived and argued with.
+
+**What the offline evaluation does and does not measure.** The
+scripted model solves gold tasks from the suite's scripted
+edits; skill text is context it accounts for, not instructions
+it follows, so on the offline profile a paired evaluation's two
+sides land equal — the gate proves the mount is safe, recorded,
+and reproducible, not that the method helps. The delta a skill
+makes is a live-model measurement: the same evaluation, run
+under a live profile, is where a method earns or loses its
+claim. The gate's design does not hide this — its record names
+the serving profile it was measured under, beside the hashes.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +

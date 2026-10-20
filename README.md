@@ -507,6 +507,41 @@ make serve       # API + console on http://localhost:8000
     promotion state, and the operator digest. Dual control at
     the plan gate was considered and deferred — the reasoning
     stands in `docs/architecture.md`.
+18. **The skills library (round 19).** The methods an agent
+    works by are governed content too. A **skill** is a named
+    instruction pack — test-first repair, minimal-diff
+    discipline, read-the-callers-first — kept as versioned
+    files (`skills/<name>/v<N>.md`) under an index that vouches
+    for each version's **content hash**, loaded fail-closed
+    like the price table. A work order may **mount** skills:
+    the mounted text enters the model's context under its own
+    labelled section — printed in the live adapter's prompts,
+    accounted for by the scripted model — and the plan record
+    **stamps** each mount's name, version, and hash, so every
+    run is reproducible against the exact text the model saw.
+    Only **published** versions mount, and publication is
+    **eval-gated** in the promotion gate's discipline: a paired
+    benchmark evaluation runs the gold tuning split with the
+    candidate mounted against the same tasks unmounted, bound
+    to the version's exact content hash, and the publish act
+    refuses by name when there is no passing evaluation, when
+    the evaluation judged different text
+    (`evaluation_stale`), when the mounted side regressed
+    against its own baseline (`regression`), when the
+    publisher is the version's author (`skill_self_publish`),
+    or when the publisher recorded the evaluation
+    (`skill_evaluator_publish`). **Rollback** un-publishes the
+    latest published version as a recorded act, and mounts
+    resolve to the previous published version again. A skill
+    is data, never code: it can inform a plan, and it cannot
+    widen scope, add a tool, or silence a gate — the shared
+    validator binds a mounted draft exactly as it binds any
+    other, and a run whose library text no longer hashes to
+    its plan's stamp refuses as `skill_content_drifted`. Each
+    version's **health** — orders mounted, the verified
+    success rate of mounted runs, median priced cost — folds
+    on read from the plan and run records, and the operator
+    digest counts mounted plans by skill.
 
 ## The gold suite (v1)
 
@@ -550,6 +585,8 @@ src/open_model_coding_agent/  the governance shell (service, gates,
 profiles/                     the model profiles, as versioned records
                               (deployment profiles in profiles/deployment/)
 prices/                       the governed price table, as versioned records
+skills/                       the skills library, as governed files
+                              (versioned content under a hash-vouched index)
 workshop/                     the sample codebase the agent works on
 evals/gold/                   the gold task suite (broken/fixed/grading)
 evals/run_evals.py            the eval gate
@@ -560,8 +597,8 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–18 plus the live-wiring round are built and gated:
-**279 tests passing, evals PASS**
+Rounds 1–19 plus the live-wiring round are built and gated:
+**309 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -732,9 +769,23 @@ reviewer refused by name as the second decision, a stranger
 refused the withdrawal, the first reviewer withdrawing
 their own decision, and a second reviewer completing the
 act with the patch exported and both deciders on the
-record. What is
+record. The skills library
+(round 19) then made the agent's methods governed content:
+versioned instruction packs kept as files under a hash-vouched
+index, mounted onto work orders as labelled context with the
+plan record stamping each mount's name, version, and content
+hash, publishable only through an eval gate — a paired
+benchmark evaluation of the version's exact content, mounted
+against unmounted on the tuning split, judged by an actor who
+is neither its author nor its evaluator, with regression
+against the paired baseline refusing by name — and rollback
+un-publishing the latest published version as a recorded act;
+a skills leg drives the whole path for real: author,
+evaluation, both duty refusals, publication, a mounted gold
+run whose packet carries the stamp, a second version, and the
+rollback. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: a skills library (round 19) and the
+`docs/architecture.md`: the
 release-hardening pass (round 20). Dual control at the plan
 gate was considered for round 18 and deferred — acceptance
 and promotion carry the second pair of eyes, and the
