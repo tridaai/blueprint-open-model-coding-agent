@@ -81,6 +81,14 @@ class WorkOrder(BaseModel):
     # template version can never rewrite what this order was
     # instantiated from.
     template: dict | None = None
+    # Round 14: when this order was created as an item of a batch,
+    # its provenance travels on the record too — the batch's id,
+    # its name (a snapshot; batches are never renamed), and the
+    # item's index in the submission. The batch's own state never
+    # lands here: an order's status is its own, and a batch-level
+    # mark (budget stopped, cancelled) lives on the batch record,
+    # never written onto the order as a fake status.
+    batch: dict | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -352,3 +360,104 @@ class ComparisonIn(BaseModel):
 
     set_name: str = "tuning"
     actor: str = "console"
+
+
+class Batch(BaseModel):
+    """A batch: a named submission of work, stored as one record.
+
+    A batch is NOT a comparison (round 8): a comparison benchmarks
+    model profiles over a task set to inform the promotion gate
+    and creates no work; a batch submits work to be done — a list
+    of work-order specifications — and benchmarks nothing. Each
+    item created one ordinary work order through ordinary intake
+    and carries the batch-level state the item stands in:
+    ``pending`` (nothing batch-level has been marked on it),
+    ``budget_stopped`` (the batch budget fold crossed a ceiling
+    before this item ever started), or ``cancelled`` (the batch
+    was cancelled before this item started). Started-ness is
+    never stored — it is folded from the order's own records, so
+    the batch can never claim work began that did not.
+
+    The batch's own fields move only by recorded acts: ``driver``
+    stands while a drive pass is recorded active (and stays
+    standing when a pass dies mid-flight, until a person releases
+    it); ``budget_stop`` names the ceiling the fold crossed;
+    cancellation records its actor, reason, and moment.
+    """
+
+    batch_id: str
+    name: str
+    actor: str  # the submitter
+    status: str = "open"  # open | cancelled
+    # The batch-level ceilings, on top of every run's own: any of
+    # the three may be None, meaning that dimension is uncapped
+    # for this batch.
+    budget: dict = Field(default_factory=dict)
+    items: list[dict] = Field(default_factory=list)
+    driver: dict | None = None
+    budget_stop: dict | None = None
+    last_drive: dict | None = None
+    cancelled_by: str | None = None
+    cancel_reason: str | None = None
+    cancelled_at: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class BatchItemIn(BaseModel):
+    """One item of a batch submission. ``kind`` names which
+    intake it will go through — ``gold`` (a gold task id),
+    ``adhoc`` (the WorkOrderIn fields), or ``template`` (a task
+    library instantiation, the TemplateInstantiateIn fields) —
+    and the fields of the other kinds are ignored. Validation is
+    the service's: every item is validated before any is created,
+    and the first invalid item refuses the whole batch by name."""
+
+    kind: str  # gold | adhoc | template
+    # gold
+    gold_task_id: str | None = None
+    # adhoc
+    title: str | None = None
+    task_text: str | None = None
+    file_scope: list[str] | None = None
+    grading_tests: list[str] = Field(default_factory=list)
+    target_path: str = ""
+    # template
+    template_name: str | None = None
+    template_version: int | None = None
+    parameters: dict[str, str] = Field(default_factory=dict)
+
+
+class BatchIn(BaseModel):
+    """A batch arrives as a submission: its name, its submitter,
+    its items, and optionally its budget ceilings — model calls,
+    provider-measured tokens, and wall seconds for the batch as a
+    whole, on top of each run's own ceilings."""
+
+    name: str
+    actor: str = "console"
+    items: list[BatchItemIn]
+    budget: dict | None = None
+
+
+class BatchDriveIn(BaseModel):
+    """Driving a batch is a recorded act: who drives this pass."""
+
+    actor: str = "console"
+
+
+class BatchCancelIn(BaseModel):
+    """Cancelling a batch is a recorded act: who, and why. Any
+    named actor may cancel — cancellation stops work, it approves
+    nothing — and the record names who did it."""
+
+    actor: str
+    reason: str
+
+
+class BatchReleaseDriverIn(BaseModel):
+    """Releasing a dead driver mark is a recorded act: who, and
+    why — the mark it clears names the pass that died holding it."""
+
+    actor: str
+    reason: str

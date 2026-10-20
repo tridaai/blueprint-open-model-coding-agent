@@ -73,6 +73,29 @@
   <h2>Task library — governed templates</h2>
   <div id="templates"><div class="muted">loading…</div></div>
 
+  <h2>Batch work orders — many orders, every gate intact</h2>
+  <div id="batches"><div class="muted">loading…</div></div>
+  <div class="card">
+    <div><strong>Submit a batch</strong> — a named list of work-order specifications.
+      Every item is validated before any is created; the first invalid item refuses
+      the whole batch. Items are JSON: <code>{"kind":"gold","gold_task_id":"…"}</code>,
+      <code>{"kind":"template","template_name":"…","parameters":{…},"gold_task_id":"…"}</code>,
+      or <code>{"kind":"adhoc","title":"…","task_text":"…","file_scope":[…],"target_path":"…"}</code>.</div>
+    <div style="margin-top:8px">
+      <input id="batch-name" size="24" placeholder="batch name">
+      <input id="batch-calls" size="10" placeholder="max calls">
+      <input id="batch-tokens" size="12" placeholder="max tokens">
+      <input id="batch-wall" size="10" placeholder="max wall s">
+    </div>
+    <div style="margin-top:6px">
+      <textarea id="batch-items" rows="4" style="width:100%"
+        placeholder='[{"kind":"gold","gold_task_id":"reserve-overcommit"}]'></textarea>
+    </div>
+    <div style="margin-top:6px">
+      <button onclick="createBatch()">Submit batch</button>
+    </div>
+  </div>
+
   <div id="detail"></div>
 </main>
 <footer>
@@ -294,7 +317,9 @@ async function loadQueue() {
             (e.last_checkpoint ? ` · last checkpoint: ${esc(e.last_checkpoint)}` : ``);
         }
         return `<tr>
-          <td>${esc(e.work_order_id)}<div class="muted">${esc(e.title)}</div></td>
+          <td>${esc(e.work_order_id)}<div class="muted">${esc(e.title)}</div>` +
+            (e.batch ? `<div class="muted">batch: ${esc(e.batch.name)} · item ${e.batch.index + 1}</div>` : ``) +
+          `</td>
           <td>${esc(e.category.replaceAll("_", " "))}<div class="muted">status: ${esc(e.status)}</div></td>
           <td><strong>${esc(e.next_act.replaceAll("_", " "))}</strong>` +
             ((e.available_acts || []).length > 1
@@ -398,6 +423,107 @@ async function instantiateTemplate(name, version) {
   } catch (e) { showError(e); }
 }
 
+async function loadBatches() {
+  const reports = await api("/api/batches");
+  if (!reports.length) {
+    $("batches").innerHTML = `<div class="muted">No batches recorded. A batch is a named
+      submission of work orders — gold tasks, ad-hoc orders, template instantiations —
+      each created through ordinary intake and governed per order. A batch is not a
+      comparison: it submits work, it benchmarks nothing.</div>`;
+    return;
+  }
+  $("batches").innerHTML = reports.map((r) => {
+    const b = r.batch, s = r.spend || {}, c = r.cost || {};
+    const budget = s.budget || {};
+    const ceiling = (label, used, cap) =>
+      `${label}: ${used}${cap === null || cap === undefined ? "" : " / " + cap}`;
+    const items = (r.items || []).map((i) => `
+      <tr>
+        <td>${i.index + 1}</td><td>${esc(i.kind)}</td>
+        <td>${esc(i.work_order_id)}<div class="muted">status: ${esc(i.order_status || "—")}</div></td>
+        <td>${esc(i.batch_state.replaceAll("_", " "))}</td>
+        <td>${i.latest_run ? `run ${esc(i.latest_run.status)}` : "no run"}` +
+          (i.failure_class ? `<div class="bad">${esc(i.failure_class)}</div>` : ``) + `</td>
+        <td>${i.next_act ? esc(i.next_act.replaceAll("_", " ")) : "—"}</td>
+      </tr>`).join("");
+    const awaiting = (r.awaiting_person || []).length
+      ? `<div class="muted">waiting on a person: ${r.awaiting_person.map((a) =>
+          `item ${a.index + 1} (${esc(a.category.replaceAll("_", " "))})`).join(" · ")}</div>` : "";
+    const stopped = s.budget_stop
+      ? `<div class="bad">budget stopped: ${esc(s.budget_stop.ceiling)} ceiling
+          ${esc(s.budget_stop.limit)} reached at ${esc(s.budget_stop.used)} —
+          unstarted items marked on the batch record; their orders stand untouched</div>` : "";
+    const lastDrive = b.last_drive
+      ? `<div class="muted">last drive: ${esc(b.last_drive.actor)} · ${esc(b.last_drive.at)}` +
+        (b.last_drive.stopped_reason ? ` · stopped: ${esc(b.last_drive.stopped_reason)}` : ``) + `</div>` : "";
+    const actions = b.status !== "cancelled"
+      ? `<button onclick="driveBatch('${esc(b.batch_id)}')">Drive</button>
+         <button class="danger" onclick="cancelBatch('${esc(b.batch_id)}')">Cancel batch</button>`
+      : `<span class="muted">cancelled by ${esc(b.cancelled_by || "")} — ${esc(b.cancel_reason || "")}</span>`;
+    return `<div class="card">
+      <div><strong>${esc(b.name)}</strong> — ${esc(r.status)}
+        <span class="muted">submitted by ${esc(b.actor)} · ${esc(b.batch_id)}</span></div>
+      <div class="muted">${ceiling("calls", s.model_calls, budget.max_model_calls)} ·
+        ${ceiling("tokens", s.tokens, budget.max_tokens)} ·
+        ${ceiling("wall", (s.wall_seconds || 0).toFixed(1) + "s", budget.max_wall_seconds ? budget.max_wall_seconds + "s" : null)} ·
+        runs succeeded: ${r.runs.succeeded}/${r.runs.total} ·
+        cost per successful task: ${c.cost_per_successful_task === null || c.cost_per_successful_task === undefined ? "—" : "$" + esc(c.cost_per_successful_task)} ·
+        challenges open: ${r.challenges_outstanding.open_must_answer} must-answer, ${r.challenges_outstanding.open_advisory} advisory</div>
+      ${stopped}${awaiting}${lastDrive}
+      <table style="margin-top:8px">
+        <thead><tr><th>#</th><th>Kind</th><th>Work order</th><th>Batch state</th><th>Run</th><th>Next act</th></tr></thead>
+        <tbody>${items}</tbody>
+      </table>
+      <div style="margin-top:8px">${actions}</div>
+    </div>`;
+  }).join("") + `<div class="muted">The driver advances items one at a time — drafting plans and
+    running approved plans — and stops at every gate a person owns. It never approves,
+    never reviews, and never runs two items at once. Sequential is the design.</div>`;
+}
+
+async function createBatch() {
+  clearError();
+  try {
+    const items = JSON.parse($("batch-items").value || "[]");
+    const num = (id) => {
+      const v = ($(id).value || "").trim();
+      return v === "" ? null : Number(v);
+    };
+    const budget = {
+      max_model_calls: num("batch-calls"),
+      max_tokens: num("batch-tokens"),
+      max_wall_seconds: num("batch-wall"),
+    };
+    await api("/api/batches", "POST", {
+      name: $("batch-name").value, actor, items, budget,
+    });
+    await loadBatches();
+    await loadOrders();
+  } catch (e) { showError(e); }
+}
+
+async function driveBatch(id) {
+  clearError();
+  try {
+    await api(`/api/batches/${id}/drive`, "POST", { actor });
+    await loadBatches();
+    await loadOrders();
+    await loadQueue();
+  } catch (e) { showError(e); await loadBatches(); }
+}
+
+async function cancelBatch(id) {
+  const reason = prompt("Why is this batch cancelled? The reason is stored on the record. Only unstarted items are marked — started work is untouched.");
+  if (reason === null) return;
+  clearError();
+  try {
+    await api(`/api/batches/${id}/cancel`, "POST", { actor, reason });
+    await loadBatches();
+    await loadOrders();
+    await loadQueue();
+  } catch (e) { showError(e); }
+}
+
 async function createFromGold(id) {
   try {
     const order = await api(`/api/work-orders/from-gold/${id}`, "POST");
@@ -429,6 +555,7 @@ async function act(path, body, id) {
     await loadQueue();
     await loadCosts();
     await loadTemplates();
+    await loadBatches();
     await showDetail(id);
   } catch (e) { showError(e); }
 }
@@ -444,6 +571,11 @@ async function showDetail(id) {
       <div>${esc(o.task_text)}</div>
       <div class="muted">status: <span class="status">${esc(o.status)}</span>
         · target: ${esc(o.target_path)}</div>`;
+  if (o.batch) {
+    html += `<div class="muted">item ${o.batch.index + 1} of batch
+      <strong>${esc(o.batch.name)}</strong> (${esc(o.batch.batch_id)}) — the batch
+      submitted this order; every gate on it is its own.</div>`;
+  }
   if (o.template) {
     const params = Object.entries(o.template.parameters || {})
       .map(([k, v]) => `${esc(k)}=${esc(v)}`).join(", ");
@@ -702,7 +834,7 @@ async function answerChallenge(id, challengeId, kind) {
   await act(`/api/work-orders/${id}/challenges/${challengeId}/answer`, body, id);
 }
 
-loadReadiness(); loadGold(); loadOrders(); loadQueue(); loadCosts(); loadPromotion(); loadComparisons(); loadTemplates();
+loadReadiness(); loadGold(); loadOrders(); loadQueue(); loadCosts(); loadPromotion(); loadComparisons(); loadTemplates(); loadBatches();
 </script>
 </body>
 </html>

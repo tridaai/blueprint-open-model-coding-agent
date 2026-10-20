@@ -19,6 +19,10 @@ from .logging_setup import request_id_var
 from .model_port import PlanDraft, PlanStepDraft
 from .models import (
     AmendPlanIn,
+    BatchCancelIn,
+    BatchDriveIn,
+    BatchIn,
+    BatchReleaseDriverIn,
     BenchmarkIn,
     ChallengeAnswerIn,
     ComparisonIn,
@@ -205,6 +209,56 @@ def create_app(settings=None) -> FastAPI:
     @app.get("/api/templates/{name}/audit")
     def template_audit(name: str):
         return service.template_audit(name)
+
+    # -- batch work orders (round 14) ---------------------------------------
+    @app.post("/api/batches", status_code=201)
+    def create_batch(body: BatchIn):
+        return service.create_batch(body)
+
+    @app.get("/api/batches")
+    def batches():
+        return service.list_batches()
+
+    @app.get("/api/batches/{batch_id}")
+    def batch(batch_id: str):
+        report = service.get_batch(batch_id)
+        if report is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "detail": f"no batch {batch_id!r}",
+                    "code": "unknown_batch",
+                },
+            )
+        return report
+
+    @app.post("/api/batches/{batch_id}/drive")
+    def drive_batch(batch_id: str, body: BatchDriveIn):
+        return service.drive_batch(batch_id, actor=body.actor)
+
+    @app.post("/api/batches/{batch_id}/cancel")
+    def cancel_batch(batch_id: str, body: BatchCancelIn):
+        return service.cancel_batch(
+            batch_id, actor=body.actor, reason=body.reason
+        )
+
+    @app.post("/api/batches/{batch_id}/release-driver")
+    def release_batch_driver(batch_id: str, body: BatchReleaseDriverIn):
+        return service.release_batch_driver(
+            batch_id, actor=body.actor, reason=body.reason
+        )
+
+    @app.get("/api/batches/{batch_id}/audit")
+    def batch_audit(batch_id: str):
+        if service.store.get_batch(batch_id) is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "detail": f"no batch {batch_id!r}",
+                    "code": "unknown_batch",
+                },
+            )
+        return service.batch_audit(batch_id)
 
     # -- gold tasks ------------------------------------------------------
     @app.get("/api/gold-tasks")

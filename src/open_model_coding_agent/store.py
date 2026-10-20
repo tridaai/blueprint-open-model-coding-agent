@@ -602,6 +602,61 @@ class SqlStore:
         )
         return [json.loads(r["payload"]) for r in rows]
 
+    # -- batches (round 14) --------------------------------------------
+    def put_batch(self, record: dict) -> None:
+        """A batch record is written at submission and afterwards
+        only by recorded acts — a drive pass's marks, a budget
+        stop, a cancellation, a driver release — each of which
+        rewrites the row whole from the record it read. Progress
+        is never written here: it is folded on read from the
+        orders' records."""
+        payload = json.dumps(record)
+        existing = self._one(
+            f"SELECT batch_id FROM batches WHERE batch_id = {self._ph}",
+            (record["batch_id"],),
+        )
+        if existing:
+            self._write(
+                f"UPDATE batches SET status = {self._ph}, "
+                f"payload = {self._ph}, updated_at = {self._ph} "
+                f"WHERE batch_id = {self._ph}",
+                (
+                    record["status"],
+                    payload,
+                    record["updated_at"],
+                    record["batch_id"],
+                ),
+            )
+        else:
+            self._write(
+                f"INSERT INTO batches (batch_id, name, status, actor, "
+                f"payload, created_at, updated_at) VALUES ({self._ph}, "
+                f"{self._ph}, {self._ph}, {self._ph}, {self._ph}, "
+                f"{self._ph}, {self._ph})",
+                (
+                    record["batch_id"],
+                    record["name"],
+                    record["status"],
+                    record["actor"],
+                    payload,
+                    record["created_at"],
+                    record["updated_at"],
+                ),
+            )
+
+    def get_batch(self, batch_id: str) -> dict | None:
+        row = self._one(
+            f"SELECT payload FROM batches WHERE batch_id = {self._ph}",
+            (batch_id,),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def list_batches(self) -> list[dict]:
+        rows = self._all(
+            "SELECT payload FROM batches ORDER BY created_at, batch_id"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
     # -- audit --------------------------------------------------------------
     def append_audit(
         self, entity: str, entity_id: str, event: str, actor: str, detail: dict

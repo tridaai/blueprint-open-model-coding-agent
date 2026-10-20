@@ -162,6 +162,34 @@ reason recorded, rather than crashing the shell.
   model profiles, templates are not promoted through benchmark
   evaluations; the evidence a template earns is its health fold,
   and the judgement to publish stays a person's.
+- Batch work orders (round 14) submit many pieces of work as
+  one named record — gold tasks, ad-hoc orders, and template
+  instantiations, mixed — and change nothing about how any one
+  of them is governed. A batch is not a comparison (round 8): a
+  comparison benchmarks profiles to inform the promotion gate
+  and creates no work; a batch creates work and benchmarks
+  nothing. Creation validates every item first, and the first
+  invalid item refuses the whole batch by name — no partial
+  submission. Each item becomes an ordinary work order through
+  ordinary intake, carrying the batch's provenance. A sequential
+  driver then advances items one at a time through the acts
+  that need no person — drafting a plan, running an approved
+  plan — and stops at every gate a person owns, recording where
+  it stopped on the batch record; it never runs two items
+  concurrently, and a second pass while one is recorded active
+  refuses by name (a pass that dies mid-flight leaves its mark
+  standing until a person releases it, as a recorded act). The
+  batch carries a budget of its own, folded on read from the
+  items' usage records; when the fold crosses a ceiling, the
+  unstarted items are marked ``budget_stopped`` on the batch
+  record — the orders themselves stay in their true state — and
+  the driver refuses to start further items by that name.
+  Cancellation likewise marks only unstarted items, at batch
+  level; started work is untouched and finishes through its own
+  gates. The batch report is a fold like the workbench's:
+  items by state, runs by outcome and failure class, challenges
+  outstanding, priced cost and cost per verified success across
+  the batch, and the items awaiting a person.
 """
 
 from __future__ import annotations
@@ -174,6 +202,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from .batches import (
+    AWAITING_PERSON,
+    NEXT_ACT_BY_STATUS,
+    TERMINAL_ORDER_STATUSES,
+    item_shape_problem,
+    validate_batch_budget,
+)
 from .benchmarks import (
     BENCHMARK_SETS,
     DEFAULT_EVALUATION_RUNS,
@@ -189,6 +224,8 @@ from .gold import GoldSuite
 from .logging_setup import log_event
 from .model_port import Step, make_model, validate_plan_draft
 from .models import (
+    Batch,
+    BatchIn,
     Plan,
     PlanStep,
     Run,
@@ -748,31 +785,23 @@ class CodingService:
             )
         return published[-1]
 
-    def instantiate_template(
+    def _plan_template_instantiation(
         self,
         name: str,
         *,
         version: int | None = None,
         parameters: dict | None = None,
-        actor: str = "console",
-        title: str | None = None,
-        target_path: str = "",
-        grading_tests: list[str] | None = None,
-        gold_task_id: str | None = None,
         file_scope: list[str] | None = None,
-    ) -> dict:
-        """Instantiate a template into an ordinary work order,
-        through ordinary intake. The parameters are substituted
-        into the template's patterns and validated on the way —
-        values that land in paths are single path-segment tokens,
-        the substituted scope is re-checked entry by entry, and a
-        caller restating a different scope is refused as widening.
-        The order carries the provenance and a snapshot of the
-        substituted skeleton; from creation on it is an ordinary
-        order — same plan gate, same sandbox, same verification.
-        No plan arrives with it: the skeleton will be shown to the
-        plan draft as labelled context, and the plan is still
-        drafted and approved per order."""
+    ) -> tuple[dict, dict, str, list[str], list[dict]]:
+        """Everything an instantiation computes before it creates
+        anything: the resolved published version, the validated
+        parameter values, the substituted task text, the
+        substituted and re-checked scope, and the substituted
+        step skeleton. Pure reads and named refusals only — the
+        batch round (14) validates a whole submission by planning
+        each template item through this and creating nothing, so
+        what creation would refuse is refused before the first
+        item of the batch exists."""
         record = self._resolve_template_version(name, version)
         steps_as_dicts = [dict(step) for step in record["plan_steps"]]
         values = validate_parameter_values(
@@ -797,6 +826,42 @@ class CodingService:
                 f"part of the published record; widening it at "
                 f"intake would make the parameter check theatre",
             )
+        return record, values, task_text, scope, skeleton
+
+    def instantiate_template(
+        self,
+        name: str,
+        *,
+        version: int | None = None,
+        parameters: dict | None = None,
+        actor: str = "console",
+        title: str | None = None,
+        target_path: str = "",
+        grading_tests: list[str] | None = None,
+        gold_task_id: str | None = None,
+        file_scope: list[str] | None = None,
+        batch_provenance: dict | None = None,
+    ) -> dict:
+        """Instantiate a template into an ordinary work order,
+        through ordinary intake. The parameters are substituted
+        into the template's patterns and validated on the way —
+        values that land in paths are single path-segment tokens,
+        the substituted scope is re-checked entry by entry, and a
+        caller restating a different scope is refused as widening.
+        The order carries the provenance and a snapshot of the
+        substituted skeleton; from creation on it is an ordinary
+        order — same plan gate, same sandbox, same verification.
+        No plan arrives with it: the skeleton will be shown to the
+        plan draft as labelled context, and the plan is still
+        drafted and approved per order."""
+        record, values, task_text, scope, skeleton = (
+            self._plan_template_instantiation(
+                name,
+                version=version,
+                parameters=parameters,
+                file_scope=file_scope,
+            )
+        )
         provenance = {
             "name": record["name"],
             "version": record["version"],
@@ -823,6 +888,7 @@ class CodingService:
             ),
             actor=actor,
             template_provenance=provenance,
+            batch_provenance=batch_provenance,
         )
         self._audit(
             "task_template",
@@ -1416,6 +1482,815 @@ class CodingService:
             for record in self.store.list_comparisons()
         ]
 
+    # -- batch work orders (round 14) --------------------------------------
+    def _require_batch(self, batch_id: str) -> dict:
+        batch = self.store.get_batch(batch_id)
+        if batch is None:
+            raise GateError(
+                "unknown_batch", f"no batch {batch_id!r} is recorded"
+            )
+        return batch
+
+    def _save_batch(self, batch: dict) -> None:
+        batch["updated_at"] = utcnow()
+        self.store.put_batch(batch)
+
+    def create_batch(self, body: BatchIn) -> dict:
+        """Submit a batch: a named list of work-order
+        specifications, validated whole before any of it exists.
+
+        Validation is two passes over the submission and writes
+        nothing: the shape of every item (its kind, the fields
+        that kind's intake cannot proceed without), then the
+        semantics — the gold task exists, the template resolves
+        to a published version with its parameters validated and
+        its scope substituted and re-checked (the same planning
+        an instantiation performs, creating nothing). The first
+        invalid item refuses the whole batch by name, with the
+        item's index in the refusal. Only then does creation run,
+        item by item, through the ordinary intakes — gold,
+        ad-hoc, template — each order carrying the batch's
+        provenance, each governed exactly as if it had arrived
+        alone. Returns the batch report, folded on read."""
+        name = (body.name or "").strip()
+        if not name:
+            raise GateError(
+                "invalid_batch",
+                "a batch is a named submission — this one carries "
+                "no name",
+            )
+        actor = (body.actor or "").strip()
+        if not actor:
+            raise GateError(
+                "invalid_batch",
+                "a batch names its submitter — the actor is "
+                "missing",
+            )
+        if not body.items:
+            raise GateError(
+                "batch_empty",
+                f"batch {name!r} submits no items — a batch with "
+                f"no items is not a submission",
+            )
+        budget = validate_batch_budget(body.budget)
+        specs = [
+            self._validate_batch_item(raw, index)
+            for index, raw in enumerate(body.items)
+        ]
+        # Validation is complete; nothing above this line has
+        # written a record. Creation goes through ordinary intake.
+        batch_id = _new_id("bat")
+        items: list[dict] = []
+        for index, spec in enumerate(specs):
+            provenance = {
+                "batch_id": batch_id,
+                "name": name,
+                "index": index,
+            }
+            order = self._create_batch_item(
+                spec, actor=actor, batch_provenance=provenance
+            )
+            items.append(
+                {
+                    "index": index,
+                    "kind": spec["kind"],
+                    "spec": spec,
+                    "work_order_id": order["work_order_id"],
+                    "item_state": "pending",
+                }
+            )
+        record = Batch(
+            batch_id=batch_id,
+            name=name,
+            actor=actor,
+            status="open",
+            budget=budget,
+            items=items,
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        ).model_dump()
+        self.store.put_batch(record)
+        self._audit(
+            "batch", batch_id, "batch_created", actor,
+            name=name, items=len(items),
+            kinds=[spec["kind"] for spec in specs], budget=budget,
+        )
+        log_event(
+            "batch_created", batch_id=batch_id, name=name,
+            items=len(items), actor=actor,
+        )
+        return self._batch_report(record)
+
+    def _validate_batch_item(self, raw, index: int) -> dict:
+        """One item of a submission, validated and normalised —
+        the shape first, then the semantics its intake will meet.
+        Every refusal carries the item's index and keeps the
+        intake's own refusal name: the batch refuses as the item
+        would, named for the item."""
+        shape = {
+            "kind": raw.kind,
+            "gold_task_id": raw.gold_task_id,
+            "template_name": raw.template_name,
+            "title": raw.title,
+            "task_text": raw.task_text,
+            "file_scope": (
+                list(raw.file_scope) if raw.file_scope is not None else None
+            ),
+        }
+        problem = item_shape_problem(shape)
+        if problem:
+            raise GateError(
+                "invalid_batch_item", f"batch item {index}: {problem}"
+            )
+        if raw.gold_task_id and self.gold.get(raw.gold_task_id) is None:
+            raise GateError(
+                "unknown_gold_task",
+                f"batch item {index}: no gold task named "
+                f"{raw.gold_task_id!r}",
+            )
+        if raw.kind == "gold":
+            return {"kind": "gold", "gold_task_id": raw.gold_task_id}
+        if raw.kind == "template":
+            try:
+                record, values, _text, _scope, _skeleton = (
+                    self._plan_template_instantiation(
+                        raw.template_name,
+                        version=raw.template_version,
+                        parameters=dict(raw.parameters or {}),
+                        file_scope=(
+                            list(raw.file_scope)
+                            if raw.file_scope is not None
+                            else None
+                        ),
+                    )
+                )
+            except GateError as exc:
+                raise GateError(
+                    exc.code, f"batch item {index}: {exc.message}"
+                ) from None
+            return {
+                "kind": "template",
+                "template_name": record["name"],
+                "template_version": record["version"],
+                "parameters": values,
+                "title": raw.title,
+                "target_path": raw.target_path,
+                "grading_tests": list(raw.grading_tests or []),
+                "gold_task_id": raw.gold_task_id,
+                "file_scope": (
+                    list(raw.file_scope)
+                    if raw.file_scope is not None
+                    else None
+                ),
+            }
+        return {
+            "kind": "adhoc",
+            "title": raw.title,
+            "task_text": raw.task_text,
+            "file_scope": list(raw.file_scope or []),
+            "grading_tests": list(raw.grading_tests or []),
+            "target_path": raw.target_path,
+            "gold_task_id": raw.gold_task_id,
+        }
+
+    def _create_batch_item(
+        self, spec: dict, *, actor: str, batch_provenance: dict
+    ) -> dict:
+        """Create one validated item's work order through the
+        ordinary intake its kind names. Nothing here is a batch
+        shortcut: the order that comes back is the order that
+        intake makes, with the batch's provenance added."""
+        if spec["kind"] == "gold":
+            return self.create_gold_work_order(
+                spec["gold_task_id"],
+                actor=actor,
+                batch_provenance=batch_provenance,
+            )
+        if spec["kind"] == "template":
+            return self.instantiate_template(
+                spec["template_name"],
+                version=spec["template_version"],
+                parameters=spec["parameters"],
+                actor=actor,
+                title=spec["title"],
+                target_path=spec["target_path"],
+                grading_tests=spec["grading_tests"],
+                gold_task_id=spec["gold_task_id"],
+                file_scope=spec["file_scope"],
+                batch_provenance=batch_provenance,
+            )
+        return self.create_work_order(
+            WorkOrderIn(
+                title=spec["title"],
+                task_text=spec["task_text"],
+                file_scope=spec["file_scope"],
+                gold_task_id=spec["gold_task_id"],
+                grading_tests=spec["grading_tests"],
+                target_path=spec["target_path"],
+                requested_by=actor,
+            ),
+            actor=actor,
+            batch_provenance=batch_provenance,
+        )
+
+    def get_batch(self, batch_id: str) -> dict | None:
+        """One batch's report, folded on read, or None."""
+        record = self.store.get_batch(batch_id)
+        return self._batch_report(record) if record else None
+
+    def list_batches(self) -> list[dict]:
+        """Every recorded batch, each folded into its report."""
+        return [
+            self._batch_report(record)
+            for record in self.store.list_batches()
+        ]
+
+    def batch_audit(self, batch_id: str) -> list[dict]:
+        return self.store.list_audit("batch", batch_id)
+
+    def _batch_item_started(self, work_order_id: str) -> bool:
+        """Has work begun on this order? Folded from its own
+        records — a plan, a run, or a single usage row (a plan
+        draft that was refused still spent the call). The batch
+        never stores this judgement: a batch-level mark may only
+        land on an item this fold calls unstarted, and the fold
+        is recomputed at the moment of the mark."""
+        return (
+            self.store.get_plan(work_order_id) is not None
+            or bool(self.store.list_runs(work_order_id))
+            or bool(self.store.list_usage(work_order_id=work_order_id))
+        )
+
+    def _batch_spend(self, batch: dict) -> dict:
+        """What the batch has spent, folded from its items' usage
+        records: the model calls (every usage row the orders
+        recorded, drafting included), the provider-measured
+        tokens (scripted character accounting is not tokens and
+        never counts toward the token ceiling — round 6's rule),
+        and the wall seconds (the sum of its runs' active
+        seconds, the quantity a run's own ceiling measures;
+        drafting is model latency recorded per call, not a run,
+        and carries no wall record of its own)."""
+        calls = 0
+        tokens = 0
+        wall = 0.0
+        for item in batch["items"]:
+            wid = item["work_order_id"]
+            rows = self.store.list_usage(work_order_id=wid)
+            calls += len(rows)
+            tokens += sum(
+                r["prompt_tokens"] + r["completion_tokens"]
+                for r in rows
+                if r["unit"] == "tokens"
+            )
+            wall += sum(
+                float(run.get("elapsed_seconds") or 0)
+                for run in self.store.list_runs(wid)
+            )
+        return {
+            "model_calls": calls,
+            "tokens": tokens,
+            "wall_seconds": wall,
+        }
+
+    @staticmethod
+    def _batch_budget_breach(
+        spend: dict, budget: dict
+    ) -> tuple[str, int, float] | None:
+        """The first batch ceiling the spend fold has reached, in
+        the budget's own order — calls, tokens, wall seconds — or
+        None. Reaching a ceiling is crossing it: the fold is
+        checked before an item starts, so a fold at the ceiling
+        starts nothing further."""
+        dimensions = (
+            ("max_model_calls", "model_calls"),
+            ("max_tokens", "tokens"),
+            ("max_wall_seconds", "wall_seconds"),
+        )
+        for ceiling, key in dimensions:
+            limit = (budget or {}).get(ceiling)
+            if limit is not None and spend[key] >= limit:
+                return ceiling, limit, spend[key]
+        return None
+
+    def _mark_batch_budget_stopped(
+        self,
+        batch: dict,
+        *,
+        from_index: int,
+        ceiling: str,
+        limit: int,
+        used: float,
+        actor: str,
+    ) -> None:
+        """Mark every unstarted item from ``from_index`` on as
+        budget_stopped, on the batch record only — the orders
+        keep their true state (they stand at draft, unplanned,
+        unrun), and the mark names why they will not start under
+        this batch. Recorded per item and for the batch."""
+        marked: list[int] = []
+        for item in batch["items"]:
+            if item["index"] < from_index:
+                continue
+            if item["item_state"] != "pending":
+                continue
+            if self._batch_item_started(item["work_order_id"]):
+                continue
+            item["item_state"] = "budget_stopped"
+            marked.append(item["index"])
+            self._audit(
+                "batch", batch["batch_id"],
+                "batch_item_budget_stopped", actor,
+                index=item["index"],
+                work_order_id=item["work_order_id"],
+                ceiling=ceiling, limit=limit, used=used,
+            )
+        batch["budget_stop"] = {
+            "ceiling": ceiling,
+            "limit": limit,
+            "used": used,
+            "at": utcnow(),
+            "items": marked,
+        }
+        self._save_batch(batch)
+        self._audit(
+            "batch", batch["batch_id"], "batch_budget_stopped",
+            actor, ceiling=ceiling, limit=limit, used=used,
+            items=marked,
+        )
+        log_event(
+            "batch_budget_stopped", batch_id=batch["batch_id"],
+            ceiling=ceiling, items=len(marked),
+        )
+
+    def drive_batch(self, batch_id: str, actor: str = "console") -> dict:
+        """One drive pass: advance the batch's items, one at a
+        time, in submission order, through the acts that need no
+        person — and stop each item at the gate a person owns.
+
+        The pass does only this per item: draft a plan where one
+        is draftable, run an approved plan, and otherwise record
+        where the item waits. It never approves a plan, never
+        reviews a run, never resumes or restarts anything — those
+        are recorded acts by named people, and the batch does not
+        borrow their authority. Items run strictly one at a time:
+        sequential is the design, not a limitation (the house
+        rule for verification), and there is no parallel path.
+
+        The pass is itself a recorded act. It marks itself active
+        on the batch record before it starts and clears the mark
+        when it completes, storing the pass's run sheet as the
+        batch's last drive; a second pass while a mark stands
+        refuses ``batch_driver_active``. A pass that dies
+        mid-flight (an exception that is not a governance
+        refusal) leaves its mark standing — the record says a
+        driver was here and did not finish — until a person
+        releases it with :meth:`release_batch_driver`. When the
+        budget fold has reached a ceiling, the pass marks the
+        unstarted items from the item it reached onward as
+        budget_stopped, completes, and then refuses by name —
+        the refusal is the pass's outcome, and the marks stand
+        either way."""
+        batch = self._require_batch(batch_id)
+        if batch["status"] == "cancelled":
+            raise GateError(
+                "batch_cancelled",
+                f"batch {batch['name']!r} stands cancelled (by "
+                f"{batch.get('cancelled_by')}: "
+                f"{batch.get('cancel_reason')}); a cancelled batch "
+                f"drives nothing",
+            )
+        standing = batch.get("driver")
+        if standing:
+            raise GateError(
+                "batch_driver_active",
+                f"a drive pass on batch {batch['name']!r} is "
+                f"already recorded active (actor "
+                f"{standing.get('actor')}, since "
+                f"{standing.get('started_at')}); if that pass "
+                f"died, release its mark as a recorded act before "
+                f"driving again",
+            )
+        batch["driver"] = {"actor": actor, "started_at": utcnow()}
+        self._save_batch(batch)
+        self._audit(
+            "batch", batch_id, "batch_drive_started", actor,
+            items=len(batch["items"]),
+        )
+        entries: list[dict] = []
+        stopped_reason: str | None = None
+        refusal: GateError | None = None
+        completed = False
+        try:
+            for item in batch["items"]:
+                entry, item_refusal = self._drive_item(
+                    batch, item, actor
+                )
+                entries.append(entry)
+                if item_refusal is not None:
+                    stopped_reason = "batch_budget_exhausted"
+                    refusal = item_refusal
+                    break
+            completed = True
+        finally:
+            if completed:
+                batch["driver"] = None
+                batch["last_drive"] = {
+                    "actor": actor,
+                    "at": utcnow(),
+                    "entries": entries,
+                    "stopped_reason": stopped_reason,
+                }
+                self._save_batch(batch)
+                self._audit(
+                    "batch", batch_id, "batch_drive_stopped", actor,
+                    entries=len(entries),
+                    stopped_reason=stopped_reason,
+                    drafted=sum(
+                        1
+                        for e in entries
+                        if e.get("action") == "drafted_plan"
+                    ),
+                    ran=sum(
+                        1 for e in entries if e.get("action") == "ran"
+                    ),
+                )
+        if refusal is not None:
+            raise refusal
+        return batch["last_drive"]
+
+    def _drive_item(
+        self, batch: dict, item: dict, actor: str
+    ) -> tuple[dict, GateError | None]:
+        """Advance one item as far as a person-free act takes it.
+        Returns the run-sheet entry, and the pass's refusal when
+        the budget stops the pass at this item."""
+        entry: dict = {
+            "index": item["index"],
+            "work_order_id": item["work_order_id"],
+            "kind": item["kind"],
+        }
+        if item["item_state"] == "cancelled":
+            entry.update(
+                action="skipped",
+                detail="cancelled at batch level before it started",
+            )
+            return entry, None
+        if item["item_state"] == "budget_stopped":
+            entry.update(
+                action="skipped",
+                detail="stopped at batch level by the batch budget",
+            )
+            return entry, None
+        order = self.store.get_work_order(item["work_order_id"])
+        if order is None:
+            entry.update(
+                action="skipped",
+                detail="the item's work order is not on record",
+            )
+            return entry, None
+        entry["from_status"] = order["status"]
+        if not self._batch_item_started(order["work_order_id"]):
+            breach = self._batch_budget_breach(
+                self._batch_spend(batch), batch["budget"]
+            )
+            if breach is not None:
+                ceiling, limit, used = breach
+                self._mark_batch_budget_stopped(
+                    batch,
+                    from_index=item["index"],
+                    ceiling=ceiling,
+                    limit=limit,
+                    used=used,
+                    actor=actor,
+                )
+                entry.update(
+                    action="refused_budget",
+                    detail=(
+                        f"the batch budget's {ceiling} ceiling "
+                        f"({limit}) is already spent ({used}); this "
+                        f"item and every unstarted item after it "
+                        f"are marked budget_stopped"
+                    ),
+                )
+                return entry, GateError(
+                    "batch_budget_exhausted",
+                    f"driving batch {batch['name']!r} refuses to "
+                    f"start item {item['index']}: the batch "
+                    f"budget's {ceiling} ceiling ({limit}) is "
+                    f"already spent ({used}) — the unstarted "
+                    f"items are marked budget_stopped on the "
+                    f"batch record, and their orders stand "
+                    f"untouched in their true state",
+                )
+        status = order["status"]
+        try:
+            if status in ("draft", "plan_rejected", "changes_requested"):
+                self.draft_plan(order["work_order_id"], actor=actor)
+                entry.update(
+                    action="drafted_plan", stopped_at="plan_gate"
+                )
+            elif status == "approved":
+                run = self.start_run(order["work_order_id"], actor=actor)
+                entry.update(
+                    action="ran",
+                    run_id=run["run_id"],
+                    run_status=run["status"],
+                    stopped_at=(
+                        "review_gate"
+                        if run["status"] == "succeeded"
+                        else None
+                    ),
+                )
+            elif status == "running":
+                entry.update(
+                    action="waiting",
+                    detail="a run is in flight on this order",
+                )
+            elif status in TERMINAL_ORDER_STATUSES:
+                entry.update(action="done")
+            else:
+                entry.update(
+                    action="waiting",
+                    stopped_at=(
+                        "plan_gate"
+                        if status == "plan_ready"
+                        else "review_gate"
+                        if status == "succeeded"
+                        else None
+                    ),
+                )
+        except GateError as exc:
+            entry.update(
+                action="stopped", error=exc.code, detail=exc.message
+            )
+        fresh = self.store.get_work_order(order["work_order_id"])
+        entry["to_status"] = fresh["status"] if fresh else status
+        entry["next_act"] = NEXT_ACT_BY_STATUS.get(entry["to_status"])
+        return entry, None
+
+    def cancel_batch(
+        self, batch_id: str, *, actor: str, reason: str
+    ) -> dict:
+        """Cancel a batch, as a recorded act. The rule: any named
+        actor may cancel — cancellation stops work, it approves
+        nothing, and the record names who did it and why. Only
+        unstarted items are marked, cancelled at batch level on
+        the batch record; their orders remain readable in their
+        true state (draft, unplanned) and are never deleted.
+        Started items are untouched: work a person or the driver
+        has begun finishes through its own gates, under its own
+        approvals, exactly as if the batch were not there."""
+        if not reason or not reason.strip():
+            raise GateError(
+                "batch_cancel_reason_required",
+                "cancelling a batch is a recorded act — it names "
+                "its reason",
+            )
+        batch = self._require_batch(batch_id)
+        if batch["status"] == "cancelled":
+            raise GateError(
+                "batch_already_cancelled",
+                f"batch {batch['name']!r} already stands "
+                f"cancelled (by {batch.get('cancelled_by')})",
+            )
+        marked: list[int] = []
+        for item in batch["items"]:
+            if item["item_state"] != "pending":
+                continue
+            if self._batch_item_started(item["work_order_id"]):
+                continue
+            item["item_state"] = "cancelled"
+            marked.append(item["index"])
+        batch["status"] = "cancelled"
+        batch["cancelled_by"] = actor
+        batch["cancel_reason"] = reason
+        batch["cancelled_at"] = utcnow()
+        self._save_batch(batch)
+        self._audit(
+            "batch", batch_id, "batch_cancelled", actor,
+            reason=reason, items_cancelled=marked,
+        )
+        log_event(
+            "batch_cancelled", batch_id=batch_id, actor=actor,
+            items_cancelled=len(marked),
+        )
+        return self._batch_report(batch)
+
+    def release_batch_driver(
+        self, batch_id: str, *, actor: str, reason: str
+    ) -> dict:
+        """Release a drive pass's mark that never cleared — the
+        pass died mid-flight — as a recorded act naming who
+        releases it and why. The mark it clears stays in the
+        audit trail (the pass's start, and this release, with
+        the dead pass's actor and start time); nothing pretends
+        the pass finished."""
+        if not reason or not reason.strip():
+            raise GateError(
+                "batch_driver_release_reason_required",
+                "releasing a driver mark is a recorded act — it "
+                "names its reason",
+            )
+        batch = self._require_batch(batch_id)
+        standing = batch.get("driver")
+        if not standing:
+            raise GateError(
+                "batch_driver_not_active",
+                f"no drive pass is recorded active on batch "
+                f"{batch['name']!r}; there is no mark to release",
+            )
+        batch["driver"] = None
+        self._save_batch(batch)
+        self._audit(
+            "batch", batch_id, "batch_driver_released", actor,
+            reason=reason,
+            released_actor=standing.get("actor"),
+            released_started_at=standing.get("started_at"),
+        )
+        log_event(
+            "batch_driver_released", batch_id=batch_id, actor=actor
+        )
+        return self._batch_report(batch)
+
+    def _batch_report(self, batch: dict) -> dict:
+        """One batch, folded on read into its report — the run
+        sheet a reader decides from. The stored marks (each
+        item's batch-level state, the budget stop, the last
+        drive) come from the batch record; everything else —
+        order states, runs and their failure classes, challenges
+        outstanding, spend, priced cost — is folded at read time
+        from the items' own records, so the report can be
+        re-derived and argued with like every other fold here.
+        The batch's standing reads derived too: cancelled when
+        the record says so, complete when every item is either
+        batch-marked or its order terminal, open otherwise."""
+        items_out: list[dict] = []
+        awaiting: list[dict] = []
+        by_order_status: dict[str, int] = {}
+        by_batch_state: dict[str, int] = {}
+        runs_total = 0
+        runs_by_status: dict[str, int] = {}
+        failures_by_class: dict[str, int] = {}
+        successes = 0
+        open_must = 0
+        open_advisory = 0
+        usage_rows: list[dict] = []
+        wall = 0.0
+        complete = bool(batch["items"])
+        for item in batch["items"]:
+            wid = item["work_order_id"]
+            order = self.store.get_work_order(wid)
+            order_status = order["status"] if order else None
+            runs = self.store.list_runs(wid)
+            rows = self.store.list_usage(work_order_id=wid)
+            usage_rows.extend(rows)
+            wall += sum(
+                float(run.get("elapsed_seconds") or 0) for run in runs
+            )
+            latest = runs[-1] if runs else None
+            started = bool(runs) or bool(rows) or (
+                self.store.get_plan(wid) is not None
+            )
+            stored_state = item["item_state"]
+            if stored_state in ("budget_stopped", "cancelled"):
+                effective = stored_state
+            elif started:
+                effective = "started"
+            else:
+                effective = "pending"
+            by_batch_state[effective] = (
+                by_batch_state.get(effective, 0) + 1
+            )
+            if order_status is not None:
+                by_order_status[order_status] = (
+                    by_order_status.get(order_status, 0) + 1
+                )
+            for run in runs:
+                runs_total += 1
+                runs_by_status[run["status"]] = (
+                    runs_by_status.get(run["status"], 0) + 1
+                )
+                if run["status"] == "succeeded":
+                    successes += 1
+                if run["status"] in ("failed", "interrupted"):
+                    failure_class, _detail = self._run_failure_class(
+                        run
+                    )
+                    failures_by_class[failure_class] = (
+                        failures_by_class.get(failure_class, 0) + 1
+                    )
+            for challenge in self.store.list_challenges(wid):
+                if challenge["status"] != "open":
+                    continue
+                if challenge["current_severity"] == "must_answer":
+                    open_must += 1
+                else:
+                    open_advisory += 1
+            failure_class = None
+            if latest is not None and latest["status"] in (
+                "failed",
+                "interrupted",
+            ):
+                failure_class, _detail = self._run_failure_class(
+                    latest
+                )
+            next_act = (
+                NEXT_ACT_BY_STATUS.get(order_status)
+                if order_status
+                else None
+            )
+            items_out.append(
+                {
+                    "index": item["index"],
+                    "kind": item["kind"],
+                    "work_order_id": wid,
+                    "batch_state": effective,
+                    "order_status": order_status,
+                    "latest_run": (
+                        {
+                            "run_id": latest["run_id"],
+                            "status": latest["status"],
+                        }
+                        if latest
+                        else None
+                    ),
+                    "failure_class": failure_class,
+                    "next_act": next_act,
+                }
+            )
+            if (
+                effective not in ("budget_stopped", "cancelled")
+                and order_status not in TERMINAL_ORDER_STATUSES
+            ):
+                complete = False
+            category = (
+                AWAITING_PERSON.get(order_status)
+                if order_status
+                else None
+            )
+            if category is not None:
+                awaiting.append(
+                    {
+                        "index": item["index"],
+                        "work_order_id": wid,
+                        "category": category,
+                        "next_act": next_act,
+                    }
+                )
+        spend = {
+            "model_calls": len(usage_rows),
+            "tokens": sum(
+                r["prompt_tokens"] + r["completion_tokens"]
+                for r in usage_rows
+                if r["unit"] == "tokens"
+            ),
+            "wall_seconds": wall,
+            "budget": batch["budget"],
+            "budget_stop": batch.get("budget_stop"),
+        }
+        fold = fold_usage(usage_rows, self.price_tables)
+        status = (
+            "cancelled"
+            if batch["status"] == "cancelled"
+            else "complete"
+            if complete
+            else "open"
+        )
+        return {
+            "batch": batch,
+            "status": status,
+            "items": items_out,
+            "counts": {
+                "items": len(items_out),
+                "by_batch_state": by_batch_state,
+                "by_order_status": by_order_status,
+            },
+            "runs": {
+                "total": runs_total,
+                "by_status": runs_by_status,
+                "succeeded": successes,
+                "failures_by_class": failures_by_class,
+            },
+            "challenges_outstanding": {
+                "open_must_answer": open_must,
+                "open_advisory": open_advisory,
+            },
+            "spend": spend,
+            "cost": fold.as_dict(successes=successes),
+            "awaiting_person": awaiting,
+            "derivation": (
+                "folded on read from the batch record and its "
+                "items' own records — work orders, plans, runs, "
+                "usage, challenges; the item states "
+                "budget_stopped and cancelled are the batch "
+                "record's own marks, and spend is the items' "
+                "usage rows folded whole (drafting included), "
+                "with wall seconds as the sum of the runs' "
+                "active seconds"
+            ),
+        }
+
     def audit(self, work_order_id: str) -> list[dict]:
         return self.store.list_audit("work_order", work_order_id)
 
@@ -1426,6 +2301,7 @@ class CodingService:
         actor: str = "console",
         *,
         template_provenance: dict | None = None,
+        batch_provenance: dict | None = None,
     ) -> dict:
         order = WorkOrder(
             work_order_id=_new_id("wo"),
@@ -1436,6 +2312,7 @@ class CodingService:
             grading_tests=list(body.grading_tests),
             requested_by=body.requested_by,
             template=template_provenance,
+            batch=batch_provenance,
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -1465,11 +2342,26 @@ class CodingService:
                 if template_provenance
                 else None
             ),
+            batch=(
+                {
+                    "batch_id": batch_provenance["batch_id"],
+                    "name": batch_provenance["name"],
+                    "index": batch_provenance["index"],
+                }
+                if batch_provenance
+                else None
+            ),
         )
         log_event("work_order_created", work_order_id=order.work_order_id)
         return order.model_dump()
 
-    def create_gold_work_order(self, gold_task_id: str, actor: str = "console") -> dict:
+    def create_gold_work_order(
+        self,
+        gold_task_id: str,
+        actor: str = "console",
+        *,
+        batch_provenance: dict | None = None,
+    ) -> dict:
         task = self.gold.get(gold_task_id)
         if task is None:
             raise GateError("unknown_gold_task", f"no gold task named {gold_task_id!r}")
@@ -1482,6 +2374,7 @@ class CodingService:
                 requested_by=actor,
             ),
             actor=actor,
+            batch_provenance=batch_provenance,
         )
 
     def _materialise_target(self, task) -> Path:
@@ -3344,6 +4237,10 @@ class CodingService:
                     "work_order_id": wid,
                     "title": order["title"],
                     "status": status,
+                    # Round 14: the batch this order arrived in,
+                    # when it arrived in one — the reviewer sees
+                    # which submission a waiting item belongs to.
+                    "batch": order.get("batch"),
                     "since": order.get("updated_at"),
                     "age_seconds": (
                         max(0, int((moment - updated).total_seconds()))
@@ -3359,7 +4256,8 @@ class CodingService:
     def review_packet(self, work_order_id: str) -> dict | None:
         """Everything a reviewer decides from, assembled for one
         order: the task and its scope, and the template provenance
-        when the order was instantiated from the library; the
+        when the order was instantiated from the library, and the
+        batch provenance when it arrived as a batch item; the
         approved plan the latest
         run ran on, with its fingerprint state; the patch and its
         shape; the verification record, with the risk flags lifted
@@ -3417,6 +4315,10 @@ class CodingService:
             # instantiated from the library — the reviewer sees the
             # shape this work came from, with the values used.
             "template": order.get("template"),
+            # Round 14: the batch provenance, when the order was
+            # created as an item of a batch — the reviewer sees
+            # the submission this work arrived in.
+            "batch": order.get("batch"),
             "plan": plan,
             "run": run,
             "patch": (run or {}).get("patch") or "",
