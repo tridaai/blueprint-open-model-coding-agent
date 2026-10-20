@@ -1307,6 +1307,112 @@ share nothing but the records. There is no auth layer: actors
 are recorded, not authenticated — the standing caveat of the
 whole blueprint, stated again in Honest limits.
 
+## Dual control (round 18)
+
+Two acts in this shell move something out of it: **review
+acceptance**, which exports a verified run's patch as the
+order's deliverable, and **promotion** at the model gate —
+including **rollback** — which changes the profile that serves
+every later run. Round 18 puts those two acts, and only those
+two, under dual control: wherever the deployment profile
+requires it, an act completes only on **two recorded decisions
+by different actors, neither of them the actor who created the
+object under decision**.
+
+The requirement is governed data, expressed through round 16's
+machinery: a fifth rule kind, `dual_control` (`off` |
+`required`), declared by every deployment record — `local`
+says `off`, `hosted` and `hosted-self` say `required`, and the
+records moved to version 2 to carry the change. The loader
+refuses a record that does not declare the kind, exactly as it
+refuses an undeclared rule of any other kind: an absent rule
+would read as permission. The rule's checker never fails a
+configuration — dual control binds behaviour at the gates, not
+the shape of a deployment — so its work is to state, in the
+readiness read, precisely what the record binds. Enforcement
+reads the requirement off the loaded deployment record at the
+two gates; there is no flag anywhere else.
+
+**Acceptance.** On a `succeeded` order, the first accept —
+after round 13's challenge bar, which stands at parking
+exactly as at completion — does not accept. It parks: the
+order's status becomes `awaiting_second_acceptance`, its own
+status, named in the review queue as the entry's category with
+the review still the next act; the patch is not exported; the
+decision is recorded as its own act (`review_acceptance_parked`,
+actor and run on the row). The second decision completes the
+act — the patch exports, the order closes `accepted`, and the
+acceptance record names both deciders. The exclusions are read
+from the records the shell already keeps: the order's
+`requested_by`, and the `decided_by` of the plan version the
+run ran on. Either identity deciding — first or second —
+refuses `dual_control_excluded_actor`; the first decider
+deciding again refuses `dual_control_same_actor` (actor
+identity is the house normalised-name comparison, as at every
+other gate). The challenge bar is re-checked at completion: a
+must-answer challenge answered between the two decisions is
+the flow the park exists to allow, and one standing unanswered
+at completion refuses the completion, not just the park. A
+reject at the parked state closes the act as rejected with
+both decisions on record (the rejection's row names the parked
+first actor); reject itself is never dual-controlled — an
+adverse decision confers nothing on its decider. A decision on
+a completed order refuses `dual_control_already_decided`.
+
+**Promotion and rollback.** The parked act lives on the
+promotion gate's audit records — never as a promotion event,
+because the events are the default's history and a parked act
+has not moved the default. The first promote/rollback that
+passes the ordinary gate (round 7's, unchanged, and re-run in
+full on the completing call, so the evidence is judged at
+completion, not at parking) parks the act and returns its
+parked shape; the second, matching act by a different actor
+appends the event, with both deciders named on it. The
+evaluator exclusion is the gate's existing `self_promotion`
+check — it runs on every call, so it binds both deciders.
+Rollback adds its own: the actor who recorded the promotion
+being undone may not decide its undo (`last event's actor`,
+`dual_control_excluded_actor`). Promoting the profile that
+already stands as the default refuses
+`dual_control_already_decided`. The gate holds **one** parked
+act at a time: a different act attempted while one stands
+parked refuses `dual_control_pending_act`, so a completion can
+never be ambiguous about which act it completes.
+
+**The parked state.** A parked act never expires — no timers,
+no sweeps: a decision waits for a person, and an act that
+quietly lapsed would be a decision nobody recorded. The first
+decider may **withdraw** their decision
+(`review_acceptance_withdrawn`, `promotion_decision_withdrawn`),
+which returns the act to undecided; anyone else attempting the
+withdrawal refuses `dual_control_not_the_decider`, and
+withdrawing or rejecting when nothing stands parked refuses
+`dual_control_no_parked_act`. Withdrawal edits nothing: the
+parked decision and its withdrawal both stay on the record.
+Every standing is folded from the audit records on read — the
+review packet's `dual_control` section, the queue entry's
+`first_actor`, the promotion state's `parked_act`, the
+operator digest's separate `dual_control` counts — the way
+every other standing in this shell is folded.
+
+**Considered and deferred: the plan gate.** Dual control at
+plan approval was the round map's original sketch for this
+round, and it was set aside deliberately. A plan approval
+already binds a scope fingerprint that execution re-checks
+(`stale_plan`), the plan's author cannot approve it into a run
+without a person's decision, and a bad plan's worst outcome is
+a refused or failed run whose patch still faces verification
+and this review gate — nothing leaves the shell at the plan
+gate. Acceptance and promotion are the two points where value
+actually moves; that is where the second pair of eyes stands.
+If a deployment's threat model changes, the rule vocabulary —
+not a scattered condition — is where a third act would join.
+
+The MCP boundary is unchanged: none of this is a tool, and a
+decision-shaped call is refused there exactly as before.
+Actors remain recorded names, not authenticated identities —
+the shell's standing limit, stated once here as everywhere.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +

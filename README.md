@@ -482,6 +482,31 @@ make serve       # API + console on http://localhost:8000
     drafted here still awaits a person's approval; a governance
     refusal returns in the shell's own words, never as a stack
     trace. See "Machine clients" below for how to run it.
+17. **Dual control (round 18).** The two acts that move
+    something out of the shell — **accepting a verified run**,
+    which exports its patch, and **promoting a model profile**
+    (or rolling one back), which changes what serves — complete,
+    where the deployment profile requires it, only on **two
+    recorded decisions by different people**, neither of them
+    the person who created the thing being decided: not the
+    order's requester or its plan's approver, not the
+    evaluation's recorder, not the promotion's own actor for
+    its rollback. The requirement is governed data — a
+    `dual_control` rule in the round-16 deployment records,
+    required under `hosted` and `hosted-self`, off under
+    `local`. The first decision **parks** the act in a named
+    state — `awaiting_second_acceptance` on the order, a parked
+    act on the promotion gate's records with the default
+    unmoved — rather than completing it. A second person may
+    complete it or reject it (both decisions stay on record);
+    the first decider may withdraw their decision, returning
+    the act to undecided; a parked act never expires. The same
+    person twice, a creator deciding, and a decision on a
+    completed act each refuse by name, and the parked acts
+    stand named on the review queue, the review packet, the
+    promotion state, and the operator digest. Dual control at
+    the plan gate was considered and deferred — the reasoning
+    stands in `docs/architecture.md`.
 
 ## The gold suite (v1)
 
@@ -535,8 +560,8 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–17 plus the live-wiring round are built and gated:
-**265 tests passing, evals PASS**
+Rounds 1–18 plus the live-wiring round are built and gated:
+**279 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -697,10 +722,23 @@ six reads over the console's own folds, plus intake and plan
 drafting through service doors that record the channel on the
 audit trail — and no tool that approves, executes, or decides,
 with decision-shaped calls refused by name and a session leg
-that ends with the plan still awaiting a human. What is
+that ends with the plan still awaiting a human, and a
+dual-control leg where one gold task's acceptance is walked
+through both of its decisions under a deployment record the
+leg writes itself — the requester refused as an excluded
+creator, the first acceptance parking the order with the
+patch unexported and the queue naming the wait, the same
+reviewer refused by name as the second decision, a stranger
+refused the withdrawal, the first reviewer withdrawing
+their own decision, and a second reviewer completing the
+act with the patch exported and both deciders on the
+record. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: dual control at the plan gate
-(round 18). The Postgres
+`docs/architecture.md`: a skills library (round 19) and the
+release-hardening pass (round 20). Dual control at the plan
+gate was considered for round 18 and deferred — acceptance
+and promotion carry the second pair of eyes, and the
+reasoning stands in `docs/architecture.md`. The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.
