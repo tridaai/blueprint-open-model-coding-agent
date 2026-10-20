@@ -119,6 +119,20 @@ only the store pointed at the harness's SQLite file — the
 deployment record, the live model profile, and every gate the
 task passes through are the hosted boot's own.
 
+SKILLS LIBRARY (round 19) — a skills leg: a skill is authored
+into a scratch library as governed files; standing recorded and
+unpublished, it refuses to mount by name. It is then evaluated
+for real — paired passes over the tuning split, the candidate
+mounted against the unmounted baseline, through the service's
+own benchmark path — and publication is refused to its author
+and to its evaluator by name before a third actor publishes it
+on that evidence. A gold order mounts the published version,
+runs end to end, and its plan record carries the mount's stamp
+(name, version, content hash), which the review packet repeats;
+health folds the mounted journey. A second version is authored,
+evaluated, and published, and a rollback un-publishes it:
+default mount resolution returns to the first version.
+
 Zero-tolerance counters: edits that landed outside the approved
 scope, runs marked SUCCEEDED without a passing verification (now
 including any SUCCEEDED whose hidden verdict is not a pass), and
@@ -166,6 +180,7 @@ from open_model_coding_agent.models import (  # noqa: E402
 )
 from open_model_coding_agent.patch import build_patch  # noqa: E402
 from open_model_coding_agent.service import CodingService  # noqa: E402
+from open_model_coding_agent.skills import write_skill  # noqa: E402
 from open_model_coding_agent.tools import SandboxTools  # noqa: E402
 
 _IGNORE = shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.pyc")
@@ -2434,6 +2449,228 @@ def dual_control_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def skills_library_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 19: the skills library, driven the way a deployment
+    drives it — a skill authored as governed files into a scratch
+    library; the mount gate refusing it while it stands
+    unpublished; a real evaluation (paired passes over the tuning
+    split, mounted candidate against unmounted baseline, through
+    the benchmark path itself); publication refused to the author
+    and to the evaluator before a third actor publishes; a gold
+    order mounted, drafted, and run end to end with the plan
+    record carrying the mount's stamp and the packet repeating
+    it; health folding the mounted journey; then a second
+    version authored, evaluated, and published, and rolled back,
+    with default mount resolution returning to the first."""
+    leg = scratch / "skills-library"
+    skills_dir = leg / "skills"
+    author, evaluator, publisher = (
+        "Skill Author",
+        "Skill Evaluator",
+        "Skill Publisher",
+    )
+    v1_entry = write_skill(
+        skills_dir,
+        name="guard-first-repair",
+        description=(
+            "For guard-shaped repairs: land the missing guard at "
+            "the boundary the failure names, first."
+        ),
+        author=author,
+        content=(
+            "# Guard-first repair\n\n"
+            "When a repair is a missing guard, work guard-first:\n\n"
+            "1. Name the boundary the failure crosses — the input, "
+            "the quantity, the state — from the failing test, "
+            "before editing.\n"
+            "2. Place the guard at that boundary, in the function "
+            "that owns it, ahead of the work it protects.\n"
+            "3. Refuse with the error shape the module already "
+            "uses for refusals; a guard that fails silently is a "
+            "bug wearing a costume.\n"
+            "4. Re-run the named tests: the guard holds the "
+            "boundary, and nothing inside it changed shape.\n"
+        ),
+    )
+    settings = load_settings(
+        sqlite_path=str(leg / "codingagent.db"),
+        targets_dir=leg / "targets",
+        runs_dir=leg / "runs",
+        artifacts_dir=leg / "artifacts",
+        skills_dir=skills_dir,
+    )
+    service = CodingService(settings)
+
+    def refusal_code(fn) -> str | None:
+        try:
+            fn()
+        except GateError as exc:
+            return exc.code
+        return None
+
+    mounts = [{"name": "guard-first-repair", "version": 1}]
+    refused_order = service.create_gold_work_order(
+        "reserve-overcommit", actor="Eval Requester", skill_mounts=mounts
+    )
+    mount_refusal = refusal_code(
+        lambda: service.draft_plan(
+            refused_order["work_order_id"], actor="Eval Requester"
+        )
+    )
+    recorded = service.get_skill("guard-first-repair", 1)
+    check(
+        "skills library: a recorded, unpublished version refuses to mount by name",
+        mount_refusal == "skill_not_published"
+        and recorded["status"] == "recorded"
+        and recorded["content_hash"] == v1_entry["content_hash"],
+        "the version stands in the library under its hash, and "
+        "the draft gate will not show its text to a model until "
+        "the skill gate publishes it",
+    )
+
+    evaluation = service.evaluate_skill(
+        "guard-first-repair", 1, actor=evaluator
+    )
+    check(
+        "skills library: the evaluation pairs the mounted candidate against the unmounted baseline",
+        evaluation["passed"] is True
+        and evaluation["violations"] == 0
+        and evaluation["set_name"] == "tuning"
+        and evaluation["task_set_hash"] == task_set_hash(suite, "tuning")
+        and evaluation["content_hash"] == v1_entry["content_hash"]
+        and evaluation["baseline"]["worst_successes"] == 4
+        and evaluation["candidate"]["worst_successes"] == 4,
+        "four tuning tasks a side, every run verified, the "
+        "mounted side carrying no zero-tolerance violation, and "
+        "the record bound to the version's exact content hash",
+    )
+
+    by_author = refusal_code(
+        lambda: service.publish_skill(
+            "guard-first-repair", 1, actor=author
+        )
+    )
+    by_evaluator = refusal_code(
+        lambda: service.publish_skill(
+            "guard-first-repair", 1, actor=evaluator
+        )
+    )
+    published = service.publish_skill(
+        "guard-first-repair", 1, actor=publisher,
+        rationale="paired tuning evidence, no regression",
+    )
+    check(
+        "skills library: publication is refused to the author and the evaluator, and lands for a third actor",
+        by_author == "skill_self_publish"
+        and by_evaluator == "skill_evaluator_publish"
+        and published["status"] == "published"
+        and published["published_by"] == publisher,
+        "separation of duties on both seats — the hand that "
+        "wrote it and the hand that measured it are both refused; "
+        "the judgement is a second person's",
+    )
+
+    order = service.create_gold_work_order(
+        "reserve-overcommit", actor="Eval Requester", skill_mounts=mounts
+    )
+    wid = order["work_order_id"]
+    plan = service.draft_plan(wid, actor="Eval Requester")
+    stamp = {
+        "name": "guard-first-repair",
+        "version": 1,
+        "content_hash": v1_entry["content_hash"],
+    }
+    service.decide_plan(wid, approve=True, actor="Eval Approver")
+    run = service.start_run(wid, actor="Eval Requester")
+    packet = service.review_packet(wid)
+    health = service.skill_health("guard-first-repair", 1)
+    check(
+        "skills library: a mounted gold run verifies, and the plan record carries the stamp",
+        plan["skills_context"] == [stamp]
+        and run["status"] == "succeeded"
+        and run["verification"]["passed"] is True
+        and packet["skills"] == [stamp]
+        and health["orders_mounted"] == 5
+        and health["runs"] == 5
+        and health["verified_success_rate"] == 1.0,
+        "the four candidate runs of the evaluation and this "
+        "order's run all mounted version 1 and verified; the "
+        "packet repeats the stamp the plan was drafted under",
+    )
+
+    # A second version: authored as new files, so a fresh service
+    # over the same store is the deployment that serves it — the
+    # publication fold carries over, the library is re-read.
+    v2_entry = write_skill(
+        skills_dir,
+        name="guard-first-repair",
+        description=(
+            "For guard-shaped repairs: land the missing guard at "
+            "the boundary the failure names, first."
+        ),
+        author=author,
+        content=(
+            "# Guard-first repair\n\n"
+            "When a repair is a missing guard, work guard-first:\n\n"
+            "1. Name the boundary the failure crosses — the input, "
+            "the quantity, the state — from the failing test, "
+            "before editing.\n"
+            "2. Place the guard at that boundary, in the function "
+            "that owns it, ahead of the work it protects.\n"
+            "3. Refuse with the error shape the module already "
+            "uses for refusals; a guard that fails silently is a "
+            "bug wearing a costume.\n"
+            "4. Read the guard's callers once it stands: a caller "
+            "the refusal now turns away is part of the change, "
+            "and the plan should have named it.\n"
+            "5. Re-run the named tests: the guard holds the "
+            "boundary, and nothing inside it changed shape.\n"
+        ),
+    )
+    service = CodingService(settings)
+    evaluation_v2 = service.evaluate_skill(
+        "guard-first-repair", 2, actor=evaluator
+    )
+    service.publish_skill("guard-first-repair", 2, actor=publisher)
+    defaulted = service.create_gold_work_order(
+        "low-stock-report",
+        actor="Eval Requester",
+        skill_mounts=[{"name": "guard-first-repair"}],
+    )
+    default_plan = service.draft_plan(
+        defaulted["work_order_id"], actor="Eval Requester"
+    )
+    rolled = service.rollback_skill(
+        "guard-first-repair", actor=publisher,
+        rationale="the caller-reading step sent reviewers back twice",
+    )
+    after = service.create_gold_work_order(
+        "low-stock-report",
+        actor="Eval Requester",
+        skill_mounts=[{"name": "guard-first-repair"}],
+    )
+    after_plan = service.draft_plan(
+        after["work_order_id"], actor="Eval Requester"
+    )
+    digest = service.operations_digest()
+    check(
+        "skills library: a second version publishes, and rollback returns resolution to the first",
+        evaluation_v2["passed"] is True
+        and evaluation_v2["content_hash"] == v2_entry["content_hash"]
+        and default_plan["skills_context"][0]["version"] == 2
+        and rolled["rolled_back_from"] == 2
+        and rolled["version"] == 1
+        and service.get_skill("guard-first-repair", 2)["status"]
+        == "rolled_back"
+        and after_plan["skills_context"] == [stamp]
+        and digest["skills"]["mounts_by_skill"]["guard-first-repair@v1"]
+        >= 6,
+        "the default mount followed the newest publication, "
+        "the rollback un-published it as a recorded act, and "
+        "resolution — and the digest's fold — stand on v1 again",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -2570,6 +2807,7 @@ def main() -> int:
     deployment_profiles_leg(suite, scratch, check)
     mcp_surface_leg(suite, scratch, check)
     dual_control_leg(suite, scratch, check)
+    skills_library_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
