@@ -1561,8 +1561,9 @@ store, serves one gold task end to end through a live model
 profile over a fake transport, and has its outcome read back
 by a second, fresh service — the bytes on disk, not one
 process's state. The harness is the gate made executable; it
-runs where a scratch Postgres stands, and no document in this
-repo claims a conformance run that has not happened.
+runs where a scratch Postgres stands; it was run as the
+release gate on 2026-10-20 — all four legs passed against a
+scratch Postgres 16 cluster, twice back to back.
 
 **The prod smoke.** `tools/prod_smoke.py` is the post-deploy
 companion to round 2's live smoke: where that tool proves the

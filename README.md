@@ -603,7 +603,9 @@ docs/architecture.md          the design, in full
 
 Rounds 1–20 plus the live-wiring round are built and gated:
 **311 tests passing, evals PASS** (plus the Postgres conformance
-leg — 4 tests, env-gated, skipped without a scratch database)
+leg — 4 tests, env-gated, skipped without a scratch database;
+run and passed 2026-10-20 against a scratch Postgres 16,
+twice back to back, hosted boot included)
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -804,13 +806,14 @@ governed data directory the app loads, with a suite test
 standing guard over the image contract and over migration
 parity between the two dialects. The conformance harness is
 the release gate made executable: it runs where a scratch
-Postgres stands, and this README does not claim a conformance
-run that has not happened. Dual control at the plan
+Postgres stands, and it was run as the release
+gate on 2026-10-20: all four legs passed against a scratch
+Postgres 16 cluster, twice back to back. Dual control at the plan
 gate was considered for round 18 and deferred — acceptance
 and promotion carry the second pair of eyes, and the
 reasoning stands in `docs/architecture.md`. The Postgres
-profile is code-complete behind the store port (SQLite is the local
-default; `DATABASE_URL` switches). Docker files are provided
+profile is conformance-proven behind the store port (SQLite is the
+local default; `DATABASE_URL` switches). Docker files are provided
 and follow the house pattern; the image build is part of
 hands-on testing.
 
