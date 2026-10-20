@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "test-first-repair",
+      "description": "For repairs: reproduce the failure with the named tests before touching code, fix the cause the failure names, and close by re-running the same tests.",
+      "versions": [
+        {
+          "version": 1,
+          "file": "test-first-repair/v1.md",
+          "author": "Blueprint Seed",
+          "content_hash": "0f23ee657bccb02ff4e4235b0031a74209ae6d5ec61a0f336b52958ee63c84b1"
+        }
+      ]
+    },
+    {
+      "name": "minimal-diff-discipline",
+      "description": "For any task: the smallest change that fully answers it \u2014 no opportunistic refactors, no renames, no reformatting of code the task did not name.",
+      "versions": [
+        {
+          "version": 1,
+          "file": "minimal-diff-discipline/v1.md",
+          "author": "Blueprint Seed",
+          "content_hash": "4929566441a931003c26fd13f6d7ee0719cad8b6aedbab2c3e6cf5ddbc33da7d"
+        }
+      ]
+    },
+    {
+      "name": "read-the-callers-first",
+      "description": "Before changing a function's behaviour: find its callers, read what they rely on, and keep the contract they were written against.",
+      "versions": [
+        {
+          "version": 1,
+          "file": "read-the-callers-first/v1.md",
+          "author": "Blueprint Seed",
+          "content_hash": "dca2f5bf81f7d1c962be730efe789b1cee2519f689e220ff6f42ea05035bee19"
+        }
+      ]
+    }
+  ]
+}

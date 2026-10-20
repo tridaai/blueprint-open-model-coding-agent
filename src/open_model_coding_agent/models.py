@@ -42,12 +42,25 @@ WORK_ORDER_STATUSES = (
 )
 
 
+class SkillMountIn(BaseModel):
+    """One skill mount request (round 19): a skill by name, and
+    the version to mount — an explicit version always names the
+    text; an omitted one resolves at draft time to the latest
+    published version. A mount is a request recorded on the
+    order; whether the version stands published is judged when
+    the plan is drafted, never assumed at intake."""
+
+    name: str
+    version: int | None = None
+
+
 class WorkOrderIn(BaseModel):
     """How a work order arrives: from a gold task, or ad hoc."""
 
     title: str
     task_text: str
     file_scope: list[str]
+    skills: list[SkillMountIn] = Field(default_factory=list)
     gold_task_id: str | None = None
     # Repo-relative test paths an ad-hoc order wants run as its
     # grading set. Gold tasks carry their grading tests in the suite.
@@ -89,6 +102,23 @@ class WorkOrder(BaseModel):
     # mark (budget stopped, cancelled) lives on the batch record,
     # never written onto the order as a fake status.
     batch: dict | None = None
+    # Round 19: the skill mounts this order asks for — each a
+    # name and an optional version, recorded at intake exactly as
+    # requested. The mounts are resolved at draft time against
+    # the library and the publication record: only a published
+    # version mounts, and the plan record then stamps the exact
+    # version and content hash the model was shown. The request
+    # is data; it can ask for context, never for scope, tools, or
+    # a gate's silence.
+    skills: list[dict] = Field(default_factory=list)
+    # Round 19: set only by the skill gate's own evaluation path,
+    # on the orders it creates to measure a candidate: those
+    # orders may mount the candidate version before it stands
+    # published — that measurement is what publication is judged
+    # by. No intake surface can set it; it is the evaluation's
+    # mark on its own work, recorded on the order like everything
+    # else about it.
+    skills_under_evaluation: bool = False
     created_at: str = ""
     updated_at: str = ""
 
@@ -132,6 +162,13 @@ class Plan(BaseModel):
     # draft context only; this plan was still drafted for this
     # order and is still approved per order.
     template_context: dict | None = None
+    # Round 19: when the draft was made with skills mounted, the
+    # plan carries their stamps — each mounted skill's name,
+    # version, and content hash. The stamp is the citation every
+    # run of this plan is reproducible against: the exact text
+    # the model was shown, named by its hash. The content itself
+    # stays in the library, where the hash finds it.
+    skills_context: list[dict] | None = None
     created_at: str = ""
 
 
@@ -365,6 +402,36 @@ class TemplateInstantiateIn(BaseModel):
     # substituted scope pattern exactly. Anything else is an
     # attempt to widen the template's scope at intake, refused.
     file_scope: list[str] | None = None
+
+
+class SkillEvaluateIn(BaseModel):
+    """A skill evaluation arrives as a recorded act: who runs it,
+    and how many paired passes over the tuning split — the
+    candidate mounted against the unmounted baseline, each pass.
+    One paired pass is the recorded minimum; more passes score
+    by their worst, like the promotion gate's evaluations."""
+
+    actor: str
+    times: int = Field(default=1, ge=1, le=5)
+
+
+class SkillPublishIn(BaseModel):
+    """Publishing a skill is a judged act: who publishes, and the
+    rationale recorded with the act. The gate refuses the
+    version's author and the evaluation's own recorder — the
+    judgement must be a second person's, on evidence."""
+
+    actor: str
+    rationale: str = ""
+
+
+class SkillRollbackIn(BaseModel):
+    """Rolling a skill back is a recorded act: who rolls back,
+    and why. It un-publishes the latest published version, so
+    mounts resolve to the previous published version again."""
+
+    actor: str
+    rationale: str = ""
 
 
 class ChallengeAnswerIn(BaseModel):

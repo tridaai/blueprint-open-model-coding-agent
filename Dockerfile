@@ -16,6 +16,7 @@ COPY --from=build /usr/local/bin/uvicorn /usr/local/bin/coding-agent /usr/local/
 COPY workshop ./workshop
 COPY evals/gold ./evals/gold
 COPY migrations ./migrations
+COPY skills ./skills
 RUN mkdir -p /app/data && chown -R appuser:appuser /app/data
 USER appuser
 ENV SQLITE_PATH=/app/data/codingagent.db \

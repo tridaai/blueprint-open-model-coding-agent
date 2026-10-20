@@ -73,6 +73,9 @@
   <h2>Task library — governed templates</h2>
   <div id="templates"><div class="muted">loading…</div></div>
 
+  <h2>Skills library — governed method bundles</h2>
+  <div id="skills"><div class="muted">loading…</div></div>
+
   <h2>Batch work orders — many orders, every gate intact</h2>
   <div id="batches"><div class="muted">loading…</div></div>
   <div class="card">
@@ -431,6 +434,69 @@ async function publishTemplate(name, version) {
   } catch (e) { showError(e); }
 }
 
+async function loadSkills() {
+  const records = await api("/api/skills");
+  if (!records.length) {
+    $("skills").innerHTML = `<div class="muted">No skills in the library.</div>`;
+    return;
+  }
+  $("skills").innerHTML = `
+    <table>
+      <thead><tr><th>Skill</th><th>Version</th><th>Status</th><th>Author</th>
+        <th>Evaluation (of this exact content)</th><th>Health (folded on read)</th><th></th></tr></thead>
+      <tbody>${records.map((s) => {
+        const ev = s.evaluation;
+        const evaluation = ev
+          ? `${ev.passed ? "passed" : "did not pass"} — mounted worst ${ev.candidate.worst_successes} vs baseline worst ${ev.baseline.worst_successes} on the tuning split · by ${esc(ev.actor)}`
+          : "no evaluation on record";
+        const h = s.health || {};
+        const health = `${h.orders_mounted} order(s) · ${h.runs_succeeded}/${h.runs} mounted run(s) succeeded` +
+          (h.verified_success_rate === null || h.verified_success_rate === undefined
+            ? ""
+            : ` · verified ${(Math.round(h.verified_success_rate * 100))}%`) +
+          (h.median_cost_per_success
+            ? ` · median cost per success $${esc(h.median_cost_per_success)}`
+            : " · no priced successes");
+        const publish = s.status !== "published"
+          ? `<button class="secondary" onclick="publishSkill('${esc(s.name)}', ${s.version})">Publish</button>`
+          : "";
+        const rollback = s.status === "published"
+          ? `<button class="secondary" onclick="rollbackSkill('${esc(s.name)}')">Roll back</button>`
+          : "";
+        return `<tr>
+          <td><strong>${esc(s.name)}</strong><div class="muted">${esc(s.description)}</div>
+            <div class="muted">content sha256: ${esc(String(s.content_hash).slice(0, 16))}…</div></td>
+          <td>v${s.version}</td>
+          <td class="status">${esc(s.status)}${s.published_by ? `<div class="muted">by ${esc(s.published_by)}</div>` : ""}</td>
+          <td>${esc(s.author)}</td>
+          <td>${evaluation}</td>
+          <td>${health}</td>
+          <td>${publish}${rollback}</td>
+        </tr>`;
+      }).join("")}
+      </tbody></table>
+    <div class="muted">A version mounts only once published, and publishing is eval-gated: it needs a
+      passing benchmark evaluation of the version's exact content hash — the candidate mounted against
+      the unmounted baseline on the tuning split — judged by someone who is neither its author nor
+      its evaluator. Rolling back un-publishes the latest published version.</div>`;
+}
+
+async function publishSkill(name, version) {
+  clearError();
+  try {
+    await api(`/api/skills/${name}/versions/${version}/publish`, "POST", { actor });
+    await loadSkills();
+  } catch (e) { showError(e); }
+}
+
+async function rollbackSkill(name) {
+  clearError();
+  try {
+    await api(`/api/skills/${name}/rollback`, "POST", { actor });
+    await loadSkills();
+  } catch (e) { showError(e); }
+}
+
 async function instantiateTemplate(name, version) {
   clearError();
   try {
@@ -573,6 +639,7 @@ async function loadDigest() {
     <div class="muted">dual control — ${d.dual_control.required ? "required" : "off"} · acceptances parked ${d.dual_control.acceptances_parked} · withdrawn ${d.dual_control.acceptances_withdrawn} · promotion decisions parked ${d.dual_control.promotion_decisions_parked} · rejected ${d.dual_control.promotion_decisions_rejected} · withdrawn ${d.dual_control.promotion_decisions_withdrawn}</div>
     <div class="muted">challenges — ${d.challenges.raised} raised · ${d.challenges.outstanding.open} outstanding (${d.challenges.outstanding.must_answer} must-answer, ${d.challenges.outstanding.advisory} advisory)</div>
     <div class="muted">batches — ${d.batches.total} (${counts(d.batches.by_standing)}), ${d.batches.items} item(s)</div>
+    <div class="muted">skills — ${d.skills.plans_mounted} plan(s) drafted with mounts (${counts(d.skills.mounts_by_skill)})</div>
     <div class="muted">usage — ${d.usage.calls} call(s) · ${d.usage.tokens} provider token(s) · priced cost $${esc(d.cost.priced_cost)}` +
     (d.cost.cost_per_successful_task !== null && d.cost.cost_per_successful_task !== undefined
       ? ` · cost per successful task $${esc(d.cost.cost_per_successful_task)}` : ` · no verified successes yet`) + `</div>
@@ -765,6 +832,12 @@ async function showDetail(id) {
         instantiated from <strong>${esc(packet.template.name)}</strong> v${packet.template.version} —
         provenance only; every gate this order passed is the ordinary one.</div>`;
     }
+    if ((packet.skills || []).length) {
+      html += `<div class="muted" style="margin-top:6px">Mounted skills: ${packet.skills.map((s) =>
+        `<strong>${esc(s.name)}</strong> v${s.version} (sha256 ${esc(String(s.content_hash).slice(0, 12))}…)`).join(", ")} —
+        the method text the model was shown, cited by its content hash; a skill informs the
+        work and changes nothing about scope, tools, or gates.</div>`;
+    }
     if (flags.test_surface_touched) {
       html += `<div class="bad" style="margin-top:6px">Risk: test surface touched (${(flags.test_surface_files || []).map(esc).join(", ")}) — this patch changes the tests it is graded by.</div>`;
     }
@@ -924,7 +997,7 @@ async function answerChallenge(id, challengeId, kind) {
   await act(`/api/work-orders/${id}/challenges/${challengeId}/answer`, body, id);
 }
 
-loadReadiness(); loadGold(); loadOrders(); loadQueue(); loadCosts(); loadPromotion(); loadComparisons(); loadTemplates(); loadBatches(); loadDigest();
+loadReadiness(); loadGold(); loadOrders(); loadQueue(); loadCosts(); loadPromotion(); loadComparisons(); loadTemplates(); loadSkills(); loadBatches(); loadDigest();
 </script>
 </body>
 </html>

@@ -241,6 +241,7 @@ from .verification import planned_files, test_surface_files, unplanned_files
 from .plans import diff_plans, drifted_files, file_digests, scope_fingerprint
 from .prices import current_table, fold_usage, load_price_tables
 from .profiles import list_profiles
+from .skills import load_skill_library
 from .store import SqlStore, utcnow
 from .taxonomy import load_taxonomy
 from .templates import (
@@ -349,6 +350,13 @@ class CodingService:
         # deployment classifies its failures under a recorded
         # version, or it does not start.
         self.taxonomy = load_taxonomy(settings.taxonomy_dir)
+        # The skills library is governed data too (round 19),
+        # loaded fail-closed at startup like the price table and
+        # the taxonomy: the index must vouch for every version's
+        # content hash, or the deployment does not start. What the
+        # library does not decide is publication — that standing
+        # is folded from the store's skill events, per act.
+        self.skills = load_skill_library(settings.skills_dir)
         # Test seam: the wall clock budgets read. Production uses
         # time.monotonic; tests may substitute a scripted clock.
         self._monotonic = time.monotonic
@@ -707,6 +715,22 @@ class CodingService:
             )
             batch_items += len(batch["items"])
 
+        # Round 19: mounted-skill usage, folded from the plan
+        # records' stamps — the plans in the window, and how often
+        # each mounted version was cited on them.
+        skill_plans = 0
+        mounts_by_skill: dict[str, int] = {}
+        for order in self.store.list_work_orders():
+            for plan in self.store.list_plans(order["work_order_id"]):
+                if not in_window(plan):
+                    continue
+                stamps = plan.get("skills_context") or []
+                if stamps:
+                    skill_plans += 1
+                for stamp in stamps:
+                    key = f"{stamp['name']}@v{stamp['version']}"
+                    mounts_by_skill[key] = mounts_by_skill.get(key, 0) + 1
+
         usage_rows = [row for row in self.store.list_usage() if in_window(row)]
         fold = fold_usage(usage_rows, self.price_tables)
 
@@ -768,6 +792,10 @@ class CodingService:
                 "by_standing": batches_by_standing,
                 "items": batch_items,
             },
+            "skills": {
+                "plans_mounted": skill_plans,
+                "mounts_by_skill": mounts_by_skill,
+            },
             "usage": {
                 "calls": len(usage_rows),
                 "tokens": sum(
@@ -784,7 +812,8 @@ class CodingService:
             "cost": fold.as_dict(successes=verified_successes),
             "derivation": (
                 "folded on read from the stored records — runs, "
-                "usage, audit, challenges, batches — over the "
+                "usage, audit, challenges, batches, and the plan "
+                "records' mounted-skill stamps — over the "
                 "window each record's created_at falls in; nothing "
                 "is stored and no counter is kept. Failures are "
                 f"classified under failure taxonomy "
@@ -1254,6 +1283,565 @@ class CodingService:
         )
         return order
 
+    # -- skills library (round 19) ---------------------------------------
+    def _require_skill_version(self, name: str, version: int):
+        """The library record for one skill version, or the named
+        refusal. The library — governed files, hash-verified at
+        load — is the only source of skill content in this shell:
+        a name or version it does not carry does not exist for
+        any act here."""
+        record = self.skills.get(name)
+        if record is None:
+            raise GateError(
+                "unknown_skill", f"no skill named {name!r} in the library"
+            )
+        found = record.versions.get(version)
+        if found is None:
+            raise GateError(
+                "unknown_skill_version",
+                f"skill {name!r} carries no version {version}; the "
+                f"library carries {sorted(record.versions)}",
+            )
+        return found
+
+    def _skill_publication(self, name: str) -> dict:
+        """A skill's publication standing, folded from its events:
+        the versions standing published now, the versions that
+        ever stood published, and the events themselves. Nothing
+        stores the standing — a publish appends an event, a
+        rollback appends an event un-publishing its version, and
+        every read folds them in order, like the promotion gate's
+        default."""
+        published: set[int] = set()
+        ever: set[int] = set()
+        events = self.store.list_skill_events(name)
+        for event in events:
+            if event["kind"] == "published":
+                published.add(event["version"])
+                ever.add(event["version"])
+            elif event["kind"] == "rolled_back":
+                published.discard(event["version"])
+        return {
+            "published": sorted(published),
+            "ever_published": ever,
+            "events": events,
+        }
+
+    def _skill_record(self, name: str, version: int) -> dict:
+        """One skill version as the surfaces read it: the
+        library's facts (author, content, the hash it is cited
+        by), its publication standing folded from the events,
+        the latest evaluation of its exact content, and its
+        health folded from the plans that mounted it."""
+        found = self._require_skill_version(name, version)
+        record = self.skills.get(name)
+        assert record is not None
+        fold = self._skill_publication(name)
+        if version in fold["published"]:
+            status = "published"
+        elif version in fold["ever_published"]:
+            status = "rolled_back"
+        else:
+            status = "recorded"
+        published_event = next(
+            (
+                event
+                for event in reversed(fold["events"])
+                if event["kind"] == "published" and event["version"] == version
+            ),
+            None,
+        )
+        evaluations = self.store.list_skill_evaluations(name, version)
+        return {
+            "name": name,
+            "description": record.description,
+            "version": version,
+            "author": found.author,
+            "content_hash": found.content_hash,
+            "content": found.content,
+            "file": found.file,
+            "status": status,
+            "published_by": (
+                published_event["actor"]
+                if published_event is not None and status == "published"
+                else None
+            ),
+            "published_at": (
+                published_event["created_at"]
+                if published_event is not None and status == "published"
+                else None
+            ),
+            "evaluation": evaluations[-1] if evaluations else None,
+            "health": self.skill_health(name, version),
+        }
+
+    def list_skills(self) -> list[dict]:
+        """Every skill version the library carries, with its
+        standing and health — the read the console's library
+        section and the API both serve."""
+        records: list[dict] = []
+        for name in self.skills.names():
+            record = self.skills.get(name)
+            assert record is not None
+            for version in sorted(record.versions):
+                records.append(self._skill_record(name, version))
+        return records
+
+    def get_skill(self, name: str, version: int | None = None) -> dict:
+        """One skill version's record. An omitted version serves
+        the latest version the library carries — published or
+        not: this is the library read, and standing is a fact on
+        the record, not a filter on it (mounting has its own
+        resolution, which serves published versions only)."""
+        record = self.skills.get(name)
+        if record is None:
+            raise GateError(
+                "unknown_skill", f"no skill named {name!r} in the library"
+            )
+        return self._skill_record(
+            name, record.latest_version() if version is None else version
+        )
+
+    def skill_audit(self, name: str) -> list[dict]:
+        if self.skills.get(name) is None:
+            raise GateError(
+                "unknown_skill", f"no skill named {name!r} in the library"
+            )
+        return self.store.list_audit("skill", name)
+
+    def skill_health(self, name: str, version: int) -> dict:
+        """A skill version's health, folded on read from the
+        plans that mounted it — never a stored counter, the
+        task library's pattern. A plan mounts a version when its
+        record stamps it; the fold counts the orders and plans
+        carrying the stamp, the runs those plans produced (a run
+        belongs to the plan version it ran), their verified
+        success rate, their failures by the workbench's classes,
+        and the median priced cost of a verified success over the
+        successes the price table actually priced."""
+        orders_mounted = 0
+        plans_mounted = 0
+        runs: list[dict] = []
+        for order in self.store.list_work_orders():
+            mounted_plan_versions: set[int] = set()
+            for plan in self.store.list_plans(order["work_order_id"]):
+                stamps = plan.get("skills_context") or []
+                if any(
+                    stamp.get("name") == name
+                    and stamp.get("version") == version
+                    for stamp in stamps
+                ):
+                    plans_mounted += 1
+                    mounted_plan_versions.add(plan["version"])
+            if mounted_plan_versions:
+                orders_mounted += 1
+                runs.extend(
+                    run
+                    for run in self.store.list_runs(order["work_order_id"])
+                    if run["plan_version"] in mounted_plan_versions
+                )
+        by_status: dict[str, int] = {}
+        failures_by_class: dict[str, int] = {}
+        priced_costs: list[Decimal] = []
+        successes = 0
+        for run in runs:
+            by_status[run["status"]] = by_status.get(run["status"], 0) + 1
+            if run["status"] in ("failed", "interrupted"):
+                failure_class, _detail = self._run_failure_class(run)
+                failures_by_class[failure_class] = (
+                    failures_by_class.get(failure_class, 0) + 1
+                )
+            if run["status"] == "succeeded":
+                successes += 1
+                cost = run.get("cost") or {}
+                if int(cost.get("priced_calls") or 0) > 0:
+                    priced_costs.append(Decimal(str(cost.get("total", "0"))))
+        return {
+            "orders_mounted": orders_mounted,
+            "plans_mounted": plans_mounted,
+            "runs": len(runs),
+            "runs_by_status": by_status,
+            "runs_succeeded": successes,
+            "failures_by_class": failures_by_class,
+            "verified_success_rate": (
+                successes / len(runs) if runs else None
+            ),
+            "priced_successes": len(priced_costs),
+            "median_cost_per_success": (
+                str(statistics.median(priced_costs)) if priced_costs else None
+            ),
+        }
+
+    def _resolve_skill_mount(
+        self, name: str, version: int | None, *, allow_unpublished: bool
+    ) -> dict:
+        """Resolve one mount request to the exact skill text it
+        will show the model: the library record, its version, and
+        its content hash. An explicit version names its text; an
+        omitted one resolves to the latest *published* version.
+        Only a published version mounts — an unpublished or
+        rolled-back version refuses by name — except under the
+        evaluation's own mark, where measuring the candidate
+        before it can be published is the act itself."""
+        record = self.skills.get(name)
+        if record is None:
+            raise GateError(
+                "unknown_skill", f"no skill named {name!r} in the library"
+            )
+        fold = self._skill_publication(name)
+        if version is not None:
+            if version not in record.versions:
+                raise GateError(
+                    "unknown_skill_version",
+                    f"skill {name!r} carries no version {version}; the "
+                    f"library carries {sorted(record.versions)}",
+                )
+            chosen = version
+        else:
+            if not fold["published"]:
+                raise GateError(
+                    "skill_not_published",
+                    f"skill {name!r} has no published version to mount; "
+                    "a version mounts only once the skill gate has "
+                    "published it",
+                )
+            chosen = fold["published"][-1]
+        if not allow_unpublished and chosen not in fold["published"]:
+            status = (
+                "was published and has been rolled back"
+                if chosen in fold["ever_published"]
+                else "has not been published"
+            )
+            raise GateError(
+                "skill_not_published",
+                f"skill {name!r} version {chosen} {status}; only a "
+                "published version may be mounted",
+            )
+        found = record.versions[chosen]
+        return {
+            "name": name,
+            "version": chosen,
+            "content_hash": found.content_hash,
+            "content": found.content,
+        }
+
+    def _resolve_skill_mounts(self, order: dict) -> list[dict]:
+        """Every mount an order asks for, resolved at draft time.
+        The resolution is the mount gate: it is where an unknown
+        or unpublished skill refuses, before any model call is
+        spent on a draft that would cite text it cannot show."""
+        allow = bool(order.get("skills_under_evaluation"))
+        return [
+            self._resolve_skill_mount(
+                request["name"], request.get("version"),
+                allow_unpublished=allow,
+            )
+            for request in order.get("skills") or []
+        ]
+
+    def _mounted_skill_entries(self, plan: dict) -> list[dict]:
+        """The mounted skill text a run executes with, resolved
+        from the plan's own stamps — and checked against them:
+        if the library's text for a stamped version no longer
+        hashes to the hash the plan cites, the run refuses as
+        ``skill_content_drifted`` rather than executing against
+        text the approved plan never saw. The plan's stamps are
+        the citation; a run reproduces them or it does not run."""
+        entries: list[dict] = []
+        for stamp in plan.get("skills_context") or []:
+            found = self.skills.get_version(stamp["name"], stamp["version"])
+            if found is None or found.content_hash != stamp["content_hash"]:
+                raise GateError(
+                    "skill_content_drifted",
+                    f"skill {stamp['name']!r} version {stamp['version']}: "
+                    f"the plan cites content hash "
+                    f"{stamp['content_hash']}, but the library now "
+                    "carries different text under that version (or "
+                    "none); the run would not be the run the plan "
+                    "was approved for — draft a fresh plan against "
+                    "the library as it stands",
+                )
+            entries.append(
+                {
+                    "name": stamp["name"],
+                    "version": stamp["version"],
+                    "content_hash": stamp["content_hash"],
+                    "content": found.content,
+                }
+            )
+        return entries
+
+    def evaluate_skill(
+        self, name: str, version: int, *, actor: str, times: int = 1
+    ) -> dict:
+        """Measure a skill version before it may be published:
+        paired passes over the gold **tuning** split through the
+        real service path — each pass runs every tuning task
+        twice, once unmounted (the baseline) and once with the
+        candidate mounted (on orders carrying the evaluation's
+        mark, the one door through which an unpublished version
+        may mount) — and records both sides under the version's
+        exact content hash and the split's task-set hash.
+
+        The comparison the record states, plainly: per pass, the
+        verified successes of the mounted runs against the
+        verified successes of the same tasks unmounted, scored by
+        the worst pass on each side, plus a zero-tolerance count
+        of the gate's violations (an out-of-scope edit, a success
+        without verification) among the mounted runs. An
+        evaluation passes when its mounted runs carry no
+        violation; whether it *publishes* is the publish act's
+        judgement, which also weighs regression — the candidate's
+        worst against its own paired baseline — under the same
+        roof, so a skill is never judged against a baseline
+        measured on a different day, split, or model."""
+        found = self._require_skill_version(name, version)
+        self._require_sound_split()
+        set_name = "tuning"
+        mounts = [{"name": name, "version": version}]
+        baseline_passes: list[list[dict]] = []
+        candidate_passes: list[list[dict]] = []
+        for _ in range(times):
+            baseline_passes.append(
+                [
+                    self._benchmark_task(
+                        self, self.gold.get(task_id), actor=actor
+                    )
+                    for task_id in BENCHMARK_SETS[set_name]
+                ]
+            )
+            candidate_passes.append(
+                [
+                    self._benchmark_task(
+                        self,
+                        self.gold.get(task_id),
+                        actor=actor,
+                        skill_mounts=mounts,
+                        under_evaluation=True,
+                    )
+                    for task_id in BENCHMARK_SETS[set_name]
+                ]
+            )
+
+        def successes_per_pass(passes: list[list[dict]]) -> list[int]:
+            return [
+                sum(1 for o in outcomes if o["verified_success"])
+                for outcomes in passes
+            ]
+
+        def violations_in(passes: list[list[dict]]) -> int:
+            return sum(
+                1
+                for outcomes in passes
+                for outcome in outcomes
+                if outcome["failure_class"]
+                in ("out_of_scope_edit", "unverified_success")
+            )
+
+        baseline_scores = successes_per_pass(baseline_passes)
+        candidate_scores = successes_per_pass(candidate_passes)
+        violations = violations_in(candidate_passes)
+        record = {
+            "evaluation_id": _new_id("sev"),
+            "name": name,
+            "version": version,
+            "content_hash": found.content_hash,
+            "set_name": set_name,
+            "task_set_hash": task_set_hash(self.gold, set_name),
+            "actor": actor,
+            "times": times,
+            "profile_id": self.serving_profile_id(),
+            "baseline": {
+                "successes_per_pass": baseline_scores,
+                "worst_successes": min(baseline_scores),
+                "outcomes": baseline_passes,
+            },
+            "candidate": {
+                "successes_per_pass": candidate_scores,
+                "worst_successes": min(candidate_scores),
+                "outcomes": candidate_passes,
+            },
+            "violations": violations,
+            "passed": violations == 0,
+            "created_at": utcnow(),
+        }
+        self.store.append_skill_evaluation(record)
+        self._audit(
+            "skill", name, "skill_evaluated", actor,
+            version=version, content_hash=found.content_hash,
+            evaluation_id=record["evaluation_id"], passed=record["passed"],
+            candidate_worst_successes=record["candidate"]["worst_successes"],
+            baseline_worst_successes=record["baseline"]["worst_successes"],
+        )
+        log_event(
+            "skill_evaluated", skill=name, version=version,
+            passed=record["passed"], actor=actor,
+        )
+        return record
+
+    def publish_skill(
+        self, name: str, version: int, *, actor: str, rationale: str = ""
+    ) -> dict:
+        """Publish one skill version — a judged act, gated on
+        evidence, in the promotion gate's discipline:
+
+        - the version must carry a benchmark evaluation of its
+          exact content hash (``no_passing_evaluation`` when none
+          exists or the latest did not pass; ``evaluation_stale``
+          when the latest evaluation judged different text);
+        - the mounted runs must not have regressed against their
+          own paired unmounted baseline (``regression``);
+        - the publisher is neither the version's author
+          (``skill_self_publish``) nor the evaluation's recorder
+          (``skill_evaluator_publish``) — the judgement is a
+          second person's, on evidence they did not produce.
+
+        Publication is an appended event; the version's standing
+        is the fold over its events from then on."""
+        found = self._require_skill_version(name, version)
+        fold = self._skill_publication(name)
+        if version in fold["published"]:
+            raise GateError(
+                "skill_already_published",
+                f"skill {name!r} version {version} already stands "
+                "published",
+            )
+        evaluations = self.store.list_skill_evaluations(name, version)
+        if not evaluations:
+            raise GateError(
+                "no_passing_evaluation",
+                f"skill {name!r} version {version} has no benchmark "
+                "evaluation on record; a version publishes only on a "
+                "passing evaluation of its exact content — evaluate "
+                "it first",
+            )
+        evaluation = evaluations[-1]
+        if evaluation["content_hash"] != found.content_hash:
+            raise GateError(
+                "evaluation_stale",
+                f"the latest evaluation of skill {name!r} version "
+                f"{version} judged content hash "
+                f"{evaluation['content_hash']}, but the library now "
+                f"carries {found.content_hash} under that version; "
+                "the evidence is about other text — evaluate the "
+                "version as it stands",
+            )
+        if not evaluation["passed"]:
+            raise GateError(
+                "no_passing_evaluation",
+                f"the latest evaluation of skill {name!r} version "
+                f"{version} did not pass: its mounted runs carried "
+                f"{evaluation['violations']} zero-tolerance "
+                "violation(s) on the tuning split",
+            )
+        if normalise_actor(actor) == normalise_actor(found.author):
+            raise GateError(
+                "skill_self_publish",
+                f"{actor!r} authored skill {name!r} version {version} "
+                "and cannot publish it; publishing is a second "
+                "person's judgement",
+            )
+        if normalise_actor(actor) == normalise_actor(evaluation["actor"]):
+            raise GateError(
+                "skill_evaluator_publish",
+                f"{actor!r} recorded the evaluation skill {name!r} "
+                f"version {version} would be published on and cannot "
+                "also publish it; the judgement must come from "
+                "someone who did not produce the evidence",
+            )
+        if (
+            evaluation["candidate"]["worst_successes"]
+            < evaluation["baseline"]["worst_successes"]
+        ):
+            raise GateError(
+                "regression",
+                f"skill {name!r} version {version} regressed on the "
+                f"tuning split: mounted worst-of-{evaluation['times']} "
+                f"verified successes "
+                f"{evaluation['candidate']['worst_successes']} against "
+                f"the unmounted baseline's "
+                f"{evaluation['baseline']['worst_successes']}",
+            )
+        event = {
+            "event_id": _new_id("ske"),
+            "kind": "published",
+            "name": name,
+            "version": version,
+            "actor": actor,
+            "rationale": rationale,
+            "evaluation_id": evaluation["evaluation_id"],
+            "content_hash": found.content_hash,
+            "created_at": utcnow(),
+        }
+        self.store.append_skill_event(event)
+        self._audit(
+            "skill", name, "skill_published", actor,
+            version=version, evaluation_id=evaluation["evaluation_id"],
+            content_hash=found.content_hash, rationale=rationale,
+        )
+        log_event(
+            "skill_published", skill=name, version=version, actor=actor,
+        )
+        return self._skill_record(name, version)
+
+    def rollback_skill(
+        self, name: str, *, actor: str, rationale: str = ""
+    ) -> dict:
+        """Roll a skill back: un-publish its latest published
+        version, as a recorded act, so mounts resolve to the
+        previous published version again. The rolled-back version
+        keeps its record and its evaluation — it may be published
+        again through the same gate — and the rollback refuses
+        when no version stands published, or when the latest
+        published version is the only one: there is no previous
+        published version to restore, and a rollback never
+        leaves a skill silently unmountable."""
+        if self.skills.get(name) is None:
+            raise GateError(
+                "unknown_skill", f"no skill named {name!r} in the library"
+            )
+        fold = self._skill_publication(name)
+        published = fold["published"]
+        if not published:
+            raise GateError(
+                "skill_not_published",
+                f"skill {name!r} stands with no published version; "
+                "there is nothing to roll back",
+            )
+        if len(published) == 1:
+            raise GateError(
+                "skill_rollback_unavailable",
+                f"version {published[0]} is the only published version "
+                f"of skill {name!r}; rolling back would leave the "
+                "skill with no published version to resolve to",
+            )
+        from_version = published[-1]
+        to_version = published[-2]
+        event = {
+            "event_id": _new_id("ske"),
+            "kind": "rolled_back",
+            "name": name,
+            "version": from_version,
+            "from_version": from_version,
+            "to_version": to_version,
+            "actor": actor,
+            "rationale": rationale,
+            "created_at": utcnow(),
+        }
+        self.store.append_skill_event(event)
+        self._audit(
+            "skill", name, "skill_rolled_back", actor,
+            from_version=from_version, to_version=to_version,
+            rationale=rationale,
+        )
+        log_event(
+            "skill_rolled_back", skill=name,
+            from_version=from_version, to_version=to_version, actor=actor,
+        )
+        record = self._skill_record(name, to_version)
+        record["rolled_back_from"] = from_version
+        return record
+
     # -- benchmarks and the promotion gate ----------------------------------
     def benchmark_sets(self) -> dict:
         """The named benchmark sets and what each measures now:
@@ -1289,6 +1877,7 @@ class CodingService:
                 database_url=self.settings.database_url,
                 profiles_dir=self.settings.profiles_dir,
                 prices_dir=self.settings.prices_dir,
+                skills_dir=self.settings.skills_dir,
                 migrations_dir=self.settings.migrations_dir,
                 gold_dir=self.settings.gold_dir,
                 targets_dir=self.settings.targets_dir,
@@ -1362,11 +1951,22 @@ class CodingService:
         )
         return record
 
-    def _benchmark_task(self, bench: "CodingService", task, *, actor: str) -> dict:
+    def _benchmark_task(
+        self,
+        bench: "CodingService",
+        task,
+        *,
+        actor: str,
+        skill_mounts: list[dict] | None = None,
+        under_evaluation: bool = False,
+    ) -> dict:
         """One task of a benchmark, end to end. A governance
         refusal anywhere in the path is recorded as the task's
         outcome — a benchmark reports what happened, it does not
-        stop at the first refusal."""
+        stop at the first refusal. The skill gate's evaluations
+        (round 19) run through this same path, with the candidate
+        skill mounted on the orders they create — the measurement
+        is the real path or it is not a measurement."""
         outcome: dict = {
             "task_id": task.id,
             "work_order_id": None,
@@ -1389,7 +1989,12 @@ class CodingService:
             },
         }
         try:
-            order = bench.create_gold_work_order(task.id, actor=actor)
+            order = bench.create_gold_work_order(
+                task.id,
+                actor=actor,
+                skill_mounts=skill_mounts,
+                skills_under_evaluation=under_evaluation,
+            )
             wid = order["work_order_id"]
             outcome["work_order_id"] = wid
             bench.draft_plan(wid, actor=actor)
@@ -2901,7 +3506,25 @@ class CodingService:
         *,
         template_provenance: dict | None = None,
         batch_provenance: dict | None = None,
+        skill_mounts: list[dict] | None = None,
+        skills_under_evaluation: bool = False,
     ) -> dict:
+        # Round 19: the order's skill mounts. An explicit service
+        # argument (the benchmark paths) wins; otherwise the
+        # intake body's own mounts stand. Either way they are
+        # recorded on the order exactly as requested — resolution
+        # against the library and the publication record happens
+        # at draft time, where an unmountable request refuses.
+        if skill_mounts is not None:
+            mounts = [
+                {"name": mount["name"], "version": mount.get("version")}
+                for mount in skill_mounts
+            ]
+        else:
+            mounts = [
+                {"name": mount.name, "version": mount.version}
+                for mount in body.skills
+            ]
         order = WorkOrder(
             work_order_id=_new_id("wo"),
             title=body.title,
@@ -2912,6 +3535,8 @@ class CodingService:
             requested_by=body.requested_by,
             template=template_provenance,
             batch=batch_provenance,
+            skills=mounts,
+            skills_under_evaluation=skills_under_evaluation,
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -2950,6 +3575,7 @@ class CodingService:
                 if batch_provenance
                 else None
             ),
+            skills=mounts if mounts else None,
         )
         log_event("work_order_created", work_order_id=order.work_order_id)
         return order.model_dump()
@@ -2960,6 +3586,8 @@ class CodingService:
         actor: str = "console",
         *,
         batch_provenance: dict | None = None,
+        skill_mounts: list[dict] | None = None,
+        skills_under_evaluation: bool = False,
     ) -> dict:
         task = self.gold.get(gold_task_id)
         if task is None:
@@ -2974,6 +3602,8 @@ class CodingService:
             ),
             actor=actor,
             batch_provenance=batch_provenance,
+            skill_mounts=skill_mounts,
+            skills_under_evaluation=skills_under_evaluation,
         )
 
     def create_work_order_mcp(self, body: WorkOrderIn, actor: str) -> dict:
@@ -3107,6 +3737,27 @@ class CodingService:
         # planner, scripted or live, is shown what the reviewer
         # asked to change, as part of the order it plans against.
         plan_input["_review_note"] = order.get("review_note")
+        # Round 19: the skills this order mounts are resolved
+        # now, before any model call is spent — published
+        # versions only, an unmountable request refusing here by
+        # name — and ride into the draft's context under their
+        # own key. The plan record stamps each mount's name,
+        # version, and content hash: the citation every run of
+        # the plan is reproducible against.
+        mounted_skills = self._resolve_skill_mounts(order)
+        if mounted_skills:
+            plan_input["_skills"] = mounted_skills
+        skills_context = (
+            [
+                {
+                    "name": mount["name"],
+                    "version": mount["version"],
+                    "content_hash": mount["content_hash"],
+                }
+                for mount in mounted_skills
+            ]
+            or None
+        )
         # Round 12: when the order was instantiated from a task
         # template, the substituted skeleton rides into the draft's
         # context under its own keys, labelled with the template it
@@ -3151,6 +3802,7 @@ class CodingService:
                 if template_prov
                 else None
             ),
+            skills_context=skills_context,
             created_at=utcnow(),
         )
         self.store.put_plan(plan.model_dump())
@@ -3159,6 +3811,7 @@ class CodingService:
             "work_order", work_order_id, "plan_drafted", actor,
             version=version, files=plan.files, model_profile=plan.model_profile,
             template_context=plan.template_context,
+            skills_context=plan.skills_context,
         )
         log_event(
             "plan_drafted", work_order_id=work_order_id, version=version,
@@ -3268,6 +3921,12 @@ class CodingService:
             tests=draft.tests,
             model_profile=previous["model_profile"],
             amended_by=actor,
+            # An amendment replaces the plan's steps, not the
+            # context the order stands under: the mounts the
+            # superseded version was drafted with carry to the
+            # amendment unchanged — they are the order's standing
+            # request, re-resolved at its next fresh draft.
+            skills_context=previous.get("skills_context"),
             created_at=utcnow(),
         )
         payload = plan.model_dump()
@@ -3387,6 +4046,19 @@ class CodingService:
             scripts[gold.id] = gold.scripted_edits
         model = self._make_model(scripts=scripts)
 
+        # Round 19: a run on a plan drafted with skills mounted is
+        # shown the same mounted text at execution — resolved from
+        # the plan's stamps and checked against them here, before
+        # any run record is created or touched, so a library whose
+        # text moved under a stamped version refuses the launch as
+        # skill_content_drifted rather than running a plan against
+        # words it never cited. (For a resume the same check
+        # leaves the interrupted run standing exactly as it was.)
+        model_order = order
+        if plan.get("skills_context"):
+            model_order = dict(order)
+            model_order["_skills"] = self._mounted_skill_entries(plan)
+
         if resume_run is None:
             run_id = _new_id("run")
             run_dir = self.settings.runs_dir / run_id
@@ -3476,7 +4148,7 @@ class CodingService:
         budget_stop: _BudgetStop | None = None
         attempt_started = self._monotonic()
         try:
-            model.start_run(work_order=order, plan=plan)
+            model.start_run(work_order=model_order, plan=plan)
             if resume_run is not None and transcript:
                 model.prepare_resume(transcript=transcript)
             while steps < max_steps:
@@ -5260,6 +5932,13 @@ class CodingService:
             # created as an item of a batch — the reviewer sees
             # the submission this work arrived in.
             "batch": order.get("batch"),
+            # Round 19: the skills the packet's plan was drafted
+            # and run with — each stamp naming the skill, its
+            # version, and the content hash of the exact text the
+            # model was shown, so a reviewer can weigh the method
+            # the run worked under and find that text in the
+            # library by its hash.
+            "skills": list((plan or {}).get("skills_context") or []),
             "plan": plan,
             "run": run,
             "patch": (run or {}).get("patch") or "",

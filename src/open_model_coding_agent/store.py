@@ -453,6 +453,76 @@ class SqlStore:
         )
         return [json.loads(r["payload"]) for r in rows]
 
+    # -- skills library (round 19) ---------------------------------------
+    def append_skill_evaluation(self, record: dict) -> None:
+        """Skill evaluations are append-only, like the promotion
+        gate's: an evaluation, once recorded, is the evidence a
+        publication is judged by — a later content edit marks it
+        stale at the gate, it never rewrites it. The content hash
+        is a column of its own because the gate judges by it."""
+        self._write(
+            f"INSERT INTO skill_evaluations (evaluation_id, name, "
+            f"version, content_hash, actor, payload, created_at) "
+            f"VALUES ({self._ph}, {self._ph}, {self._ph}, {self._ph}, "
+            f"{self._ph}, {self._ph}, {self._ph})",
+            (
+                record["evaluation_id"],
+                record["name"],
+                record["version"],
+                record["content_hash"],
+                record["actor"],
+                json.dumps(record),
+                record["created_at"],
+            ),
+        )
+
+    def list_skill_evaluations(
+        self, name: str | None = None, version: int | None = None
+    ) -> list[dict]:
+        sql = "SELECT payload FROM skill_evaluations"
+        clauses: list[str] = []
+        params: list = []
+        if name is not None:
+            clauses.append(f"name = {self._ph}")
+            params.append(name)
+        if version is not None:
+            clauses.append(f"version = {self._ph}")
+            params.append(version)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY created_at"
+        return [json.loads(r["payload"]) for r in self._all(sql, tuple(params))]
+
+    def append_skill_event(self, record: dict) -> None:
+        """The publication history is append-only: publishes and
+        rollbacks are events, and a version's standing is derived
+        by folding them — history is never rewritten to make a
+        rollback look like the version was never published."""
+        self._write(
+            f"INSERT INTO skill_events (event_id, kind, name, "
+            f"version, actor, payload, created_at) VALUES "
+            f"({self._ph}, {self._ph}, {self._ph}, {self._ph}, "
+            f"{self._ph}, {self._ph}, {self._ph})",
+            (
+                record["event_id"],
+                record["kind"],
+                record["name"],
+                record["version"],
+                record["actor"],
+                json.dumps(record),
+                record["created_at"],
+            ),
+        )
+
+    def list_skill_events(self, name: str | None = None) -> list[dict]:
+        sql = "SELECT payload FROM skill_events"
+        params: tuple = ()
+        if name is not None:
+            sql += f" WHERE name = {self._ph}"
+            params = (name,)
+        sql += " ORDER BY seq"
+        return [json.loads(r["payload"]) for r in self._all(sql, params)]
+
     # -- shortlist comparisons (round 8) --------------------------------
     def append_comparison(self, record: dict) -> None:
         """Comparison records are append-only, like the benchmark

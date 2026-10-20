@@ -37,6 +37,9 @@ from .models import (
     RunAbandonIn,
     RunActionIn,
     RunStartIn,
+    SkillEvaluateIn,
+    SkillPublishIn,
+    SkillRollbackIn,
     TemplateIn,
     TemplateInstantiateIn,
     TemplatePublishIn,
@@ -218,6 +221,53 @@ def create_app(settings=None) -> FastAPI:
     @app.get("/api/templates/{name}/audit")
     def template_audit(name: str):
         return service.template_audit(name)
+
+    # -- the skills library (round 19) --------------------------------------
+    @app.get("/api/skills")
+    def skills():
+        return service.list_skills()
+
+    @app.get("/api/skills/{name}")
+    def skill(name: str):
+        try:
+            return service.get_skill(name)
+        except GateError as exc:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": exc.message, "code": exc.code},
+            )
+
+    @app.get("/api/skills/{name}/versions/{version}")
+    def skill_version(name: str, version: int):
+        try:
+            return service.get_skill(name, version)
+        except GateError as exc:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": exc.message, "code": exc.code},
+            )
+
+    @app.post("/api/skills/{name}/versions/{version}/evaluate", status_code=201)
+    def evaluate_skill(name: str, version: int, body: SkillEvaluateIn):
+        return service.evaluate_skill(
+            name, version, actor=body.actor, times=body.times
+        )
+
+    @app.post("/api/skills/{name}/versions/{version}/publish")
+    def publish_skill(name: str, version: int, body: SkillPublishIn):
+        return service.publish_skill(
+            name, version, actor=body.actor, rationale=body.rationale
+        )
+
+    @app.post("/api/skills/{name}/rollback")
+    def rollback_skill(name: str, body: SkillRollbackIn):
+        return service.rollback_skill(
+            name, actor=body.actor, rationale=body.rationale
+        )
+
+    @app.get("/api/skills/{name}/audit")
+    def skill_audit(name: str):
+        return service.skill_audit(name)
 
     # -- batch work orders (round 14) ---------------------------------------
     @app.post("/api/batches", status_code=201)

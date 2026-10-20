@@ -270,6 +270,12 @@ class OfflineScriptedModel(ModelPort):
                 # of what this draft was shown.
                 "template": work_order.get("_template"),
                 "template_steps": work_order.get("_template_steps"),
+                # Round 19: the mounted skills, when the service
+                # supplies them, are likewise part of what this
+                # draft was shown — the method text rides in the
+                # accounting by its stamps and content, like every
+                # other context this model accounts for.
+                "skills": work_order.get("_skills"),
             },
             {"approach": draft.approach, "files": draft.files, "tests": draft.tests},
         )
