@@ -457,8 +457,8 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–14 plus the live-wiring round are built and gated:
-**213 tests passing, evals PASS**
+Rounds 1–15 plus the live-wiring round are built and gated:
+**231 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
