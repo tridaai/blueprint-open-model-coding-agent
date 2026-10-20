@@ -88,6 +88,28 @@ class SqlStore:
                 )
             conn.commit()
 
+    # -- migrations ---------------------------------------------------
+    def migration_status(self) -> dict:
+        """The store's migration standing, read live: the versions
+        the database records as applied, the versions on disk for
+        this dialect, and the difference. Readiness reports it —
+        a store whose database stands behind its migrations is a
+        deployment fact, named, not a surprise at first write."""
+        rows = self._all(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        )
+        applied = [row["version"] for row in rows]
+        on_disk = [
+            path.stem for path in _migration_files(self.kind, self.migrations_dir)
+        ]
+        behind = [version for version in on_disk if version not in applied]
+        return {
+            "applied": applied,
+            "on_disk": on_disk,
+            "behind": behind,
+            "current": not behind,
+        }
+
     # -- helpers ------------------------------------------------------
     def _one(self, sql: str, params: tuple = ()) -> dict | None:
         with self._connect() as conn:

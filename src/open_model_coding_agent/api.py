@@ -71,16 +71,7 @@ def create_app(settings=None) -> FastAPI:
 
     @app.get("/readiness")
     def readiness():
-        profile = service.serving_profile()
-        return {
-            "status": "ready",
-            "store": settings.store_kind,
-            "model_profile": profile.profile_id,
-            "model_label": profile.label,
-            "default_model_profile": service.default_profile_id(),
-            "baseten_base_url": profile.base_url,
-            "baseten_model": profile.model,
-        }
+        return service.readiness()
 
     @app.get("/")
     def console():
@@ -90,6 +81,11 @@ def create_app(settings=None) -> FastAPI:
     @app.get("/api/costs")
     def costs():
         return service.cost_report()
+
+    # -- observability (round 15) -------------------------------------------
+    @app.get("/api/operations-digest")
+    def operations_digest(since: str | None = None, until: str | None = None):
+        return service.operations_digest(since=since, until=until)
 
     # -- the review workbench (round 11) -----------------------------------
     @app.get("/api/review-queue")

@@ -194,6 +194,7 @@ reason recorded, rather than crashing the shell.
 
 from __future__ import annotations
 
+import os
 import shutil
 import statistics
 import time
@@ -240,6 +241,7 @@ from .plans import diff_plans, drifted_files, file_digests, scope_fingerprint
 from .prices import current_table, fold_usage, load_price_tables
 from .profiles import list_profiles
 from .store import SqlStore, utcnow
+from .taxonomy import load_taxonomy
 from .templates import (
     SEED_AUTHOR,
     SEED_PUBLISHER,
@@ -341,6 +343,11 @@ class CodingService:
         # a malformed one, does not start half-priced.
         self.price_tables = load_price_tables(settings.prices_dir)
         self.price_table = current_table(self.price_tables)
+        # The failure taxonomy is governed data too (round 15),
+        # loaded fail-closed at startup like the price table: a
+        # deployment classifies its failures under a recorded
+        # version, or it does not start.
+        self.taxonomy = load_taxonomy(settings.taxonomy_dir)
         # Test seam: the wall clock budgets read. Production uses
         # time.monotonic; tests may substitute a scripted clock.
         self._monotonic = time.monotonic
@@ -543,6 +550,293 @@ class CodingService:
                 "runs": len(runs),
                 **total_fold.as_dict(successes=total_successes),
             },
+        }
+
+    # -- observability (round 15) -------------------------------------------
+
+    def operations_digest(
+        self, *, since: str | None = None, until: str | None = None
+    ) -> dict:
+        """The operator digest: the deployment's standing, folded
+        from the stored records on every read — no metrics table,
+        no stored counters, so the digest can be re-derived and
+        argued with like every other fold in this shell.
+
+        The window filters each record family by its own
+        ``created_at`` (runs, usage rows, audit records, challenges,
+        batches); the default is all records. Challenge and batch
+        standings are as they stand at read time — the fold reports
+        what the records say now about the window's work, and says
+        so in its derivation. Failures are counted by name (the
+        workbench's failure class off the run record) and classified
+        under the governed taxonomy; a name the taxonomy does not
+        carry counts as ``unclassified`` under its own name — never
+        dropped, because records outlive the build that wrote them.
+        """
+        since_dt = _parse_ts(since) if since else None
+        until_dt = _parse_ts(until) if until else None
+        if (since and since_dt is None) or (until and until_dt is None):
+            raise GateError(
+                "invalid_digest_window",
+                "the digest window's timestamps must be ISO "
+                "timestamps the shell can read",
+            )
+        if since_dt is not None and until_dt is not None and since_dt > until_dt:
+            raise GateError(
+                "invalid_digest_window",
+                "the digest window's start stands after its end",
+            )
+
+        def in_window(record: dict) -> bool:
+            stamp = _parse_ts(record.get("created_at"))
+            if stamp is None:
+                return since_dt is None and until_dt is None
+            if since_dt is not None and stamp < since_dt:
+                return False
+            if until_dt is not None and stamp > until_dt:
+                return False
+            return True
+
+        runs = [run for run in self.store.all_runs() if in_window(run)]
+        runs_by_status: dict[str, int] = {}
+        failures_by_name: dict[str, int] = {}
+        verified_successes = 0
+        for run in runs:
+            runs_by_status[run["status"]] = (
+                runs_by_status.get(run["status"], 0) + 1
+            )
+            if run["status"] == "succeeded":
+                verified_successes += 1
+            if run["status"] in ("failed", "interrupted"):
+                name, _detail = self._run_failure_class(run)
+                failures_by_name[name] = failures_by_name.get(name, 0) + 1
+        failures_by_class: dict[str, int] = {}
+        unclassified: dict[str, int] = {}
+        classified: dict[str, dict] = {}
+        for name, count in failures_by_name.items():
+            entry = self.taxonomy.classify(name)
+            classified[name] = entry
+            failures_by_class[entry["class"]] = (
+                failures_by_class.get(entry["class"], 0) + count
+            )
+            if entry["class"] == "unclassified":
+                unclassified[name] = count
+        top_failures = [
+            {
+                "name": name,
+                "count": count,
+                "class": classified[name]["class"],
+                "class_label": self.taxonomy.class_label(
+                    classified[name]["class"]
+                ),
+                "cause": classified[name]["cause"],
+                "action": classified[name]["action"],
+            }
+            for name, count in sorted(
+                failures_by_name.items(), key=lambda item: (-item[1], item[0])
+            )[:10]
+        ]
+        names_by_class: dict[str, list[str]] = {}
+        for name in failures_by_name:
+            names_by_class.setdefault(classified[name]["class"], []).append(name)
+        failure_classes = [
+            {
+                "id": class_id,
+                "label": self.taxonomy.class_label(class_id),
+                "count": count,
+                "names": sorted(names_by_class.get(class_id, [])),
+            }
+            for class_id, count in sorted(
+                failures_by_class.items(), key=lambda item: (-item[1], item[0])
+            )
+        ]
+
+        decision_events = self.store.list_audit_events(
+            [
+                "plan_drafted",
+                "plan_approved",
+                "plan_rejected",
+                "plan_amended",
+                "review_accepted",
+                "review_rejected",
+                "review_changes_requested",
+            ]
+        )
+        decisions = [row for row in decision_events if in_window(row)]
+
+        def count_event(event: str) -> int:
+            return sum(1 for row in decisions if row["event"] == event)
+
+        challenges = [
+            challenge
+            for challenge in self.store.list_challenges()
+            if in_window(challenge)
+        ]
+        challenges_by_rule: dict[str, int] = {}
+        challenges_by_status: dict[str, int] = {}
+        open_must = 0
+        open_advisory = 0
+        for challenge in challenges:
+            challenges_by_rule[challenge["rule"]] = (
+                challenges_by_rule.get(challenge["rule"], 0) + 1
+            )
+            challenges_by_status[challenge["status"]] = (
+                challenges_by_status.get(challenge["status"], 0) + 1
+            )
+            if challenge["status"] == "open":
+                if challenge["current_severity"] == "must_answer":
+                    open_must += 1
+                else:
+                    open_advisory += 1
+
+        batches = [
+            batch for batch in self.store.list_batches() if in_window(batch)
+        ]
+        batches_by_standing: dict[str, int] = {}
+        batch_items = 0
+        for batch in batches:
+            standing = self._batch_report(batch)["status"]
+            batches_by_standing[standing] = (
+                batches_by_standing.get(standing, 0) + 1
+            )
+            batch_items += len(batch["items"])
+
+        usage_rows = [row for row in self.store.list_usage() if in_window(row)]
+        fold = fold_usage(usage_rows, self.price_tables)
+
+        return {
+            "window": {"since": since, "until": until},
+            "taxonomy_version": self.taxonomy.version,
+            "runs": {"total": len(runs), "by_status": runs_by_status},
+            "failures": {
+                "total": sum(failures_by_name.values()),
+                "by_name": failures_by_name,
+                "by_class": failures_by_class,
+                "classes": failure_classes,
+                "unclassified": unclassified,
+                "top": top_failures,
+            },
+            "plan_decisions": {
+                "drafted": count_event("plan_drafted"),
+                "approved": count_event("plan_approved"),
+                "rejected": count_event("plan_rejected"),
+                "amended": count_event("plan_amended"),
+            },
+            "review_decisions": {
+                "accepted": count_event("review_accepted"),
+                "rejected": count_event("review_rejected"),
+                "changes_requested": count_event("review_changes_requested"),
+            },
+            "challenges": {
+                "raised": len(challenges),
+                "by_rule": challenges_by_rule,
+                "by_status": challenges_by_status,
+                "outstanding": {
+                    "open": open_must + open_advisory,
+                    "must_answer": open_must,
+                    "advisory": open_advisory,
+                },
+            },
+            "batches": {
+                "total": len(batches),
+                "by_standing": batches_by_standing,
+                "items": batch_items,
+            },
+            "usage": {
+                "calls": len(usage_rows),
+                "tokens": sum(
+                    row["prompt_tokens"] + row["completion_tokens"]
+                    for row in usage_rows
+                    if row["unit"] == "tokens"
+                ),
+                "scripted_chars": sum(
+                    row["prompt_tokens"] + row["completion_tokens"]
+                    for row in usage_rows
+                    if row["unit"] == "chars"
+                ),
+            },
+            "cost": fold.as_dict(successes=verified_successes),
+            "derivation": (
+                "folded on read from the stored records — runs, "
+                "usage, audit, challenges, batches — over the "
+                "window each record's created_at falls in; nothing "
+                "is stored and no counter is kept. Failures are "
+                f"classified under failure taxonomy "
+                f"v{self.taxonomy.version}; challenge and batch "
+                "standings are as they stand at read time."
+            ),
+        }
+
+    def readiness(self) -> dict:
+        """The deployment's readiness, probed live and reported by
+        name — never as a stack trace. Three probings: the store
+        answers and its migrations stand current against the ones
+        on disk; the serving profile can actually serve (a live
+        profile recorded not servable, or missing its key, is
+        not-ready with the reason named); and the governed data in
+        force (the price table's version; the taxonomy's, in the
+        digest). ``/health`` stays the cheap liveness check; this
+        is the deployment check."""
+        problems: list[str] = []
+        try:
+            migrations = self.store.migration_status()
+            store_reachable = True
+            store_error = None
+        except Exception as exc:  # the probe reports; it never raises
+            migrations = None
+            store_reachable = False
+            store_error = f"{type(exc).__name__}: {exc}"
+            problems.append("the store did not answer its probe")
+        if migrations is not None and not migrations["current"]:
+            problems.append(
+                "the store's migrations stand behind the ones on "
+                f"disk: {migrations['behind']}"
+            )
+
+        profile = None
+        profile_reason: str | None = None
+        try:
+            profile = self.serving_profile()
+        except ConfigError as exc:
+            profile_reason = str(exc)
+        if profile is not None and profile.is_live:
+            if not profile.servable:
+                profile_reason = (
+                    profile.not_servable_reason
+                    or "recorded servable: false"
+                )
+            elif not os.environ.get(profile.api_key_env or ""):
+                profile_reason = (
+                    f"model profile {profile.profile_id!r} is live "
+                    f"and needs {profile.api_key_env} set in the "
+                    f"environment"
+                )
+        profile_state = (
+            "ready" if profile is not None and profile_reason is None
+            else "not_ready"
+        )
+        if profile_reason is not None:
+            problems.append(f"the serving profile cannot serve: "
+                            f"{profile_reason}")
+
+        return {
+            "status": "ready" if not problems else "not_ready",
+            "store": self.settings.store_kind,
+            "store_reachable": store_reachable,
+            "store_error": store_error,
+            "migrations": migrations,
+            "model_profile": self.serving_profile_id(),
+            "model_label": profile.label if profile is not None else None,
+            "model_state": {
+                "state": profile_state,
+                "reason": profile_reason,
+            },
+            "default_model_profile": self.default_profile_id(),
+            "baseten_base_url": profile.base_url if profile is not None else None,
+            "baseten_model": profile.model if profile is not None else None,
+            "price_table_version": self.price_table.version,
+            "taxonomy_version": self.taxonomy.version,
+            "problems": problems,
         }
 
     # -- the task library (round 12) ---------------------------------------
@@ -2519,6 +2813,10 @@ class CodingService:
             version=version, files=plan.files, model_profile=plan.model_profile,
             template_context=plan.template_context,
         )
+        log_event(
+            "plan_drafted", work_order_id=work_order_id, version=version,
+            actor=actor,
+        )
         return plan.model_dump()
 
     def _scope_fingerprint(self, order: dict, plan: dict) -> tuple[str, dict]:
@@ -2570,6 +2868,11 @@ class CodingService:
             "plan_approved" if approve else "plan_rejected", actor,
             version=plan["version"], note=note,
             scope_fingerprint=plan.get("scope_fingerprint"),
+        )
+        log_event(
+            "plan_decided", work_order_id=work_order_id,
+            version=plan["version"],
+            decision="approved" if approve else "rejected", actor=actor,
         )
         return plan
 
@@ -2632,6 +2935,11 @@ class CodingService:
             steps_removed=len(diff["steps_removed"]),
             steps_changed=len(diff["steps_changed"]),
             files_added=diff["files_added"], files_removed=diff["files_removed"],
+        )
+        log_event(
+            "plan_amended", work_order_id=work_order_id,
+            from_version=previous["version"], to_version=plan.version,
+            actor=actor,
         )
         return payload
 
