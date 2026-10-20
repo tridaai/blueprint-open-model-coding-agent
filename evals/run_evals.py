@@ -104,6 +104,21 @@ recorded-shape responses (no network, no key):
    revise through the send-back path); and a fresh run
    supersedes the first run's challenges without deleting them.
 
+DEPLOYMENT PROFILES (round 16) — a deployment leg: the settings
+boot under the `hosted` deployment profile with a complete fake
+env (a live model profile, its key present, DATABASE_URL set)
+and every declared rule evaluates satisfied; the same boot
+without DATABASE_URL refuses at load, naming the deployment
+profile and the store rule; and one gold task serves end to end
+under the hosted profile through the fake transport, its run
+record stamped with the deployment profile it ran under. The
+leg's one deviation, stated plainly: the eval environment has
+no Postgres (its live conformance is the release round's gate),
+so the serving service is built from the booted settings with
+only the store pointed at the harness's SQLite file — the
+deployment record, the live model profile, and every gate the
+task passes through are the hosted boot's own.
+
 Zero-tolerance counters: edits that landed outside the approved
 scope, runs marked SUCCEEDED without a passing verification (now
 including any SUCCEEDED whose hidden verdict is not a pass), and
@@ -117,6 +132,7 @@ import os
 import shutil
 import sys
 import tempfile
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -130,7 +146,11 @@ from open_model_coding_agent.benchmarks import (  # noqa: E402
     task_set_hash,
 )
 from open_model_coding_agent.config import load_settings  # noqa: E402
-from open_model_coding_agent.errors import GateError  # noqa: E402
+from open_model_coding_agent.deployments import (  # noqa: E402
+    evaluate_rules,
+    violated_rules,
+)
+from open_model_coding_agent.errors import ConfigError, GateError  # noqa: E402
 from open_model_coding_agent.gold import GoldSuite  # noqa: E402
 from open_model_coding_agent.model_port import (  # noqa: E402
     OfflineScriptedModel,
@@ -2074,6 +2094,117 @@ def observability_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def deployment_profiles_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 16: deployment profiles — naming binds the rules.
+
+    Boots the settings under `hosted` with a complete fake env
+    (a live model profile, its key present, DATABASE_URL set):
+    the load passes and every declared rule evaluates satisfied.
+    The same boot without DATABASE_URL refuses at load, naming
+    the deployment profile and the store rule. Then one gold
+    task serves end to end under the hosted profile through the
+    fake transport — the production shape through the same
+    service path — and the run record carries the stamp.
+
+    The one deviation, stated plainly: the eval environment has
+    no Postgres (its live conformance is the release round's
+    gate), so the serving service is built from the booted
+    settings with only the store pointed at the harness's
+    SQLite file. The deployment record, the live model profile,
+    and every gate the task passes through are the hosted
+    boot's own."""
+    task = suite.get("reserve-overcommit")
+    calls = [_tool_call("c-read", "read_file", {"path": task.file_scope[0]})]
+    for index, edit in enumerate(task.scripted_edits):
+        calls.append(
+            _tool_call(
+                f"c-edit-{index}",
+                "edit_file",
+                {"path": edit["path"], "old": edit["old"], "new": edit["new"]},
+            )
+        )
+    script = [
+        _chat(
+            content=json.dumps(
+                {"approach": task.plan_approach, "steps": task.plan_steps}
+            )
+        ),
+        _chat(tool_calls=calls),
+        _chat(content="the repair is complete"),
+    ]
+    names = ("DEPLOYMENT_PROFILE", "DATABASE_URL", "BASETEN_API_KEY")
+    saved = {name: os.environ.get(name) for name in names}
+    os.environ["DEPLOYMENT_PROFILE"] = "hosted"
+    os.environ["BASETEN_API_KEY"] = "eval-fake-key"
+    os.environ["DATABASE_URL"] = (
+        "postgresql://codingagent:codingagent@db:5432/codingagent"
+    )
+    try:
+        booted = load_settings(model_profile="baseten-glm")
+        states = evaluate_rules(
+            booted.deployment,
+            model_profile=booted.profile,
+            store_kind=booted.store_kind,
+            environ=os.environ,
+        )
+        check(
+            "deployment profiles: hosted boots under a complete env",
+            booted.deployment.name == "hosted" and not violated_rules(states),
+            f"deployment {booted.deployment.name} "
+            f"v{booted.deployment.version}; rules "
+            f"{[(state['rule'], state['state']) for state in states]}",
+        )
+        del os.environ["DATABASE_URL"]
+        refusal = None
+        try:
+            load_settings(model_profile="baseten-glm")
+        except ConfigError as exc:
+            refusal = str(exc)
+        check(
+            "deployment profiles: hosted refuses without DATABASE_URL, "
+            "naming the store rule",
+            refusal is not None
+            and "deployment profile 'hosted'" in refusal
+            and "rule 'store'" in refusal,
+            refusal or "the boot without DATABASE_URL loaded",
+        )
+        os.environ["DATABASE_URL"] = (
+            "postgresql://codingagent:codingagent@db:5432/codingagent"
+        )
+        settings = replace(
+            booted,
+            database_url=None,
+            sqlite_path=str(scratch / "deployment" / "codingagent.db"),
+            targets_dir=scratch / "deployment" / "targets",
+            runs_dir=scratch / "deployment" / "runs",
+            artifacts_dir=scratch / "deployment" / "artifacts",
+        )
+        settings.model_transport = _FakeTransport(script)
+        service = CodingService(settings)
+        order = service.create_gold_work_order(task.id, actor="evals")
+        wid = order["work_order_id"]
+        service.draft_plan(wid, actor="evals")
+        service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+        run = service.start_run(wid, actor="evals")
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    check(
+        "deployment profiles: a gold task serves under the hosted profile",
+        run["status"] == "succeeded" and run["verification"].get("passed"),
+        f"run {run['status']}; {run['verification'].get('reason')}",
+    )
+    check(
+        "deployment profiles: the run record carries the deployment stamp",
+        run["deployment_profile"] == "hosted",
+        f"deployment_profile {run['deployment_profile']!r} on run "
+        f"{run['run_id']}",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -2207,6 +2338,7 @@ def main() -> int:
     challenge_pass_leg(suite, scratch, check)
     batch_leg(suite, scratch, check)
     observability_leg(suite, scratch, check)
+    deployment_profiles_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
