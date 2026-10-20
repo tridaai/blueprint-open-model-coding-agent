@@ -661,6 +661,11 @@ class CodingService:
                 "review_accepted",
                 "review_rejected",
                 "review_changes_requested",
+                "review_acceptance_parked",
+                "review_acceptance_withdrawn",
+                "promotion_decision_parked",
+                "promotion_decision_rejected",
+                "promotion_decision_withdrawn",
             ]
         )
         decisions = [row for row in decision_events if in_window(row)]
@@ -729,6 +734,24 @@ class CodingService:
                 "accepted": count_event("review_accepted"),
                 "rejected": count_event("review_rejected"),
                 "changes_requested": count_event("review_changes_requested"),
+            },
+            "dual_control": {
+                "required": self._dual_control_required(),
+                "acceptances_parked": count_event(
+                    "review_acceptance_parked"
+                ),
+                "acceptances_withdrawn": count_event(
+                    "review_acceptance_withdrawn"
+                ),
+                "promotion_decisions_parked": count_event(
+                    "promotion_decision_parked"
+                ),
+                "promotion_decisions_rejected": count_event(
+                    "promotion_decision_rejected"
+                ),
+                "promotion_decisions_withdrawn": count_event(
+                    "promotion_decision_withdrawn"
+                ),
             },
             "challenges": {
                 "raised": len(challenges),
@@ -1613,6 +1636,14 @@ class CodingService:
             "task_set_hash": current_hash,
             "created_at": utcnow(),
         }
+        if self._dual_control_required():
+            # Round 18: the gate above has passed, but under dual
+            # control the act completes only on a second, distinct
+            # decision. The evaluator exclusion is already
+            # enforced — it is the self-promotion check above, and
+            # it runs on every call, so both deciders are judged
+            # against it.
+            return self._dual_control_promotion_act(event, actor=actor)
         self.store.append_promotion_event(event)
         log_event(
             "profile_promoted", profile_id=profile_id,
@@ -1647,6 +1678,19 @@ class CodingService:
             "task_set_hash": task_set_hash(self.gold, SET_HELD_OUT),
             "created_at": utcnow(),
         }
+        if self._dual_control_required():
+            # Round 18: rollback is a promotion-gate act too, and
+            # the actor who recorded the promotion being undone is
+            # excluded from deciding its undo — the creator does
+            # not judge their own act, in either direction.
+            return self._dual_control_promotion_act(
+                event,
+                actor=actor,
+                excluded={
+                    "the actor who recorded the promotion being "
+                    "rolled back": last["actor"]
+                },
+            )
         self.store.append_promotion_event(event)
         log_event(
             "profile_rolled_back", profile_id=target,
@@ -1654,10 +1698,237 @@ class CodingService:
         )
         return {**event, "default_profile_id": target}
 
+    # -- dual control at the promotion gate (round 18) ------------------
+    #
+    # A parked promotion-gate act lives on the gate's audit
+    # records (entity ``promotion``), never in the promotion
+    # events: the events are the default's history, and a parked
+    # act has not moved the default. The gate holds one parked
+    # act at a time — a second, different act attempted while one
+    # stands parked refuses by name, so a completion can never be
+    # ambiguous about which act it completes.
+
+    def _parked_promotion_act(self) -> dict | None:
+        """The promotion gate's parked act, folded from its audit
+        records: a ``promotion_decision_parked`` row not yet
+        closed by the matching completion, rejection, or
+        withdrawal. The fold is keyed on the act itself — kind,
+        from, to — so a closed act can never shadow a later one."""
+        parked = None
+        for row in self.store.list_audit("promotion", "default"):
+            detail = row.get("detail") or {}
+            if row["event"] == "promotion_decision_parked":
+                parked = {
+                    "kind": detail.get("kind"),
+                    "from_profile": detail.get("from_profile"),
+                    "to_profile": detail.get("to_profile"),
+                    "first_actor": row["actor"],
+                    "at": row["created_at"],
+                    "rationale": detail.get("rationale"),
+                    "evaluation_id": detail.get("evaluation_id"),
+                }
+            elif row["event"] in (
+                "promotion_decision_completed",
+                "promotion_decision_rejected",
+                "promotion_decision_withdrawn",
+            ):
+                if (
+                    parked is not None
+                    and detail.get("kind") == parked["kind"]
+                    and detail.get("from_profile")
+                    == parked["from_profile"]
+                    and detail.get("to_profile") == parked["to_profile"]
+                ):
+                    parked = None
+        return parked
+
+    def _dual_control_promotion_act(
+        self,
+        event: dict,
+        *,
+        actor: str,
+        excluded: dict[str, str] | None = None,
+    ) -> dict:
+        """The dual-control path for a promotion-gate act whose
+        ordinary gate has already passed (the caller built the
+        event the single-decision path would append). The first
+        decision parks the act on the gate's audit — the default
+        unmoved, no event appended. A matching act by a second,
+        different, non-excluded actor completes it: the event is
+        appended with both deciders named on it. A matching act
+        by the first actor refuses by name; an act that does not
+        match the parked one refuses as pending; and a promotion
+        to the profile that already stands as the default refuses
+        as already decided — there is no act left to take."""
+        kind = event["kind"]
+        source = event["from_profile"]
+        target = event["to_profile"]
+        for role, name in (excluded or {}).items():
+            if name and normalise_actor(actor) == normalise_actor(name):
+                raise GateError(
+                    "dual_control_excluded_actor",
+                    f"{kind} refused: {actor!r} is {role} "
+                    f"({name!r}); under dual control the actor who "
+                    f"created the object under decision may not "
+                    f"decide it",
+                )
+        parked = self._parked_promotion_act()
+        if parked is not None and (
+            parked["kind"],
+            parked["from_profile"],
+            parked["to_profile"],
+        ) != (kind, source, target):
+            raise GateError(
+                "dual_control_pending_act",
+                f"{kind} refused: a {parked['kind']} "
+                f"({parked['from_profile']} → "
+                f"{parked['to_profile']}, first decided by "
+                f"{parked['first_actor']!r}) stands parked at the "
+                f"promotion gate awaiting its second decision; "
+                f"complete, reject, or withdraw it before another "
+                f"act is taken",
+            )
+        if parked is None:
+            if source == target:
+                raise GateError(
+                    "dual_control_already_decided",
+                    f"promotion refused: profile {target!r} "
+                    f"already stands as the default; the act is "
+                    f"complete and takes no decision",
+                )
+            self._audit(
+                "promotion", "default", "promotion_decision_parked",
+                actor,
+                kind=kind, from_profile=source, to_profile=target,
+                rationale=event.get("rationale"),
+                evaluation_id=event.get("evaluation_id"),
+            )
+            log_event(
+                "promotion_decision_parked", profile_id=target,
+                kind=kind, actor=actor,
+            )
+            return {
+                "status": "awaiting_second_decision",
+                "kind": kind,
+                "from_profile": source,
+                "to_profile": target,
+                "first_actor": actor,
+                "default_profile_id": self.default_profile_id(),
+            }
+        if normalise_actor(actor) == normalise_actor(
+            parked["first_actor"]
+        ):
+            raise GateError(
+                "dual_control_same_actor",
+                f"{kind} refused: {actor!r} recorded the first "
+                f"decision of the parked {kind} "
+                f"({source} → {target}); under dual control the "
+                f"second decision must come from a different actor",
+            )
+        completed = {
+            **event,
+            "dual_control": {
+                "first_actor": parked["first_actor"],
+                "second_actor": actor,
+            },
+        }
+        self.store.append_promotion_event(completed)
+        self._audit(
+            "promotion", "default", "promotion_decision_completed",
+            actor,
+            kind=kind, from_profile=source, to_profile=target,
+            first_actor=parked["first_actor"],
+        )
+        log_event(
+            "profile_promoted" if kind == "promotion"
+            else "profile_rolled_back",
+            profile_id=target, from_profile=source, actor=actor,
+        )
+        return {**completed, "default_profile_id": target}
+
+    def reject_promotion_decision(
+        self, *, actor: str, reason: str | None = None
+    ) -> dict:
+        """Reject the promotion gate's parked act — the adverse
+        close. Any actor may record it (a rejection confers
+        nothing on its decider, so no exclusion applies); both
+        decisions stand on record, the parked one in its own row,
+        and the default never moved."""
+        parked = self._parked_promotion_act()
+        if parked is None:
+            raise GateError(
+                "dual_control_no_parked_act",
+                "rejection refused: no promotion-gate act stands "
+                "parked; there is no open decision to reject",
+            )
+        self._audit(
+            "promotion", "default", "promotion_decision_rejected",
+            actor,
+            kind=parked["kind"],
+            from_profile=parked["from_profile"],
+            to_profile=parked["to_profile"],
+            first_actor=parked["first_actor"],
+            reason=reason,
+        )
+        log_event(
+            "promotion_decision_rejected",
+            profile_id=parked["to_profile"], kind=parked["kind"],
+            actor=actor,
+        )
+        return {
+            "status": "rejected",
+            **parked,
+            "rejected_by": actor,
+            "default_profile_id": self.default_profile_id(),
+        }
+
+    def withdraw_promotion_decision(self, *, actor: str) -> dict:
+        """Withdraw the promotion gate's parked act — its first
+        decider's own undo, and only theirs. The gate returns to
+        undecided; the withdrawn decision stays on the audit
+        record."""
+        parked = self._parked_promotion_act()
+        if parked is None:
+            raise GateError(
+                "dual_control_no_parked_act",
+                "withdrawal refused: no promotion-gate act stands "
+                "parked; there is no open decision to withdraw",
+            )
+        if normalise_actor(actor) != normalise_actor(
+            parked["first_actor"]
+        ):
+            raise GateError(
+                "dual_control_not_the_decider",
+                f"withdrawal refused: the parked {parked['kind']} "
+                f"was first decided by {parked['first_actor']!r}; "
+                f"a decision is its decider's to withdraw, and no "
+                f"one else's",
+            )
+        self._audit(
+            "promotion", "default", "promotion_decision_withdrawn",
+            actor,
+            kind=parked["kind"],
+            from_profile=parked["from_profile"],
+            to_profile=parked["to_profile"],
+        )
+        log_event(
+            "promotion_decision_withdrawn",
+            profile_id=parked["to_profile"], kind=parked["kind"],
+            actor=actor,
+        )
+        return {
+            "status": "withdrawn",
+            **parked,
+            "default_profile_id": self.default_profile_id(),
+        }
+
     def promotion_state(self) -> dict:
         """The gate's whole position, as recorded: the default and
         where it came from, the sets and their current hashes,
-        every evaluation, and the full promotion history."""
+        every evaluation, and the full promotion history. Under
+        dual control, the gate's parked act stands here too —
+        named, with its first decider — because a parked act is
+        part of the gate's position, not a rumour about it."""
         return {
             "default_profile_id": self.default_profile_id(),
             "configured_profile_id": self.settings.model_profile,
@@ -1665,6 +1936,10 @@ class CodingService:
             "sets": self.benchmark_sets(),
             "evaluations": self.store.list_promotion_evaluations(),
             "events": self.store.list_promotion_events(),
+            "dual_control": {
+                "required": self._dual_control_required(),
+                "parked_act": self._parked_promotion_act(),
+            },
         }
 
     def list_benchmarks(self, profile_id: str | None = None) -> list[dict]:
@@ -4039,6 +4314,134 @@ class CodingService:
         return [gold.hidden_grading_relpath()]
 
     # -- review gate -----------------------------------------------------------
+    # -- dual control (round 18) -------------------------------------------
+    #
+    # The deployment profile's ``dual_control`` rule (round 16's
+    # machinery, round 18's rule kind) binds the two consequential
+    # acceptance acts: review acceptance, and promotion/rollback
+    # at the model gate. Where the rule requires it, an act
+    # completes only on TWO recorded decisions by different
+    # actors, neither of them the actor who created the object
+    # under decision. The first decision parks the act — recorded
+    # as its own act, the act's object unmoved — and the second,
+    # distinct decision completes it. A parked act never expires
+    # (no timers: a decision waits for a person, not a clock), and
+    # its decider may withdraw it, which returns the act to
+    # undecided with the withdrawal on record.
+
+    def _dual_control_required(self) -> bool:
+        """Whether the deployment profile in force binds the
+        acceptance acts to two decisions. Read off the loaded
+        deployment record — the same record readiness reports —
+        never off a scattered flag."""
+        return (
+            self.settings.deployment.rules.get("dual_control")
+            == "required"
+        )
+
+    def _acceptance_standing(
+        self, work_order_id: str, run_id: str
+    ) -> dict | None:
+        """A run's acceptance standing under dual control, folded
+        from the order's audit records: the parked first decision
+        when one stands open on this run, else None. A park is
+        opened by ``review_acceptance_parked`` and closed by the
+        completion, the rejection, or the withdrawal — every one
+        of them a recorded act, so the fold is the whole story."""
+        standing = None
+        for row in self.store.list_audit("work_order", work_order_id):
+            detail = row.get("detail") or {}
+            if detail.get("run_id") != run_id:
+                continue
+            if row["event"] == "review_acceptance_parked":
+                standing = {
+                    "state": "awaiting_second_acceptance",
+                    "first_actor": row["actor"],
+                    "at": row["created_at"],
+                    "run_id": run_id,
+                }
+            elif row["event"] in (
+                "review_acceptance_withdrawn",
+                "review_accepted",
+                "review_rejected",
+            ):
+                standing = None
+        return standing
+
+    def _refuse_if_acceptance_excluded(
+        self, order: dict, run: dict, actor: str
+    ) -> None:
+        """Dual control's creator exclusion for review acceptance:
+        the order's requester and the approver of the plan the run
+        ran on are both named on stored records, and neither may
+        decide the acceptance of work they set in motion."""
+        excluded: list[tuple[str, str]] = []
+        requester = order.get("requested_by")
+        if requester:
+            excluded.append(("the work order's requester", requester))
+        plan = self.store.get_plan(
+            order["work_order_id"], run["plan_version"]
+        )
+        approver = (plan or {}).get("decided_by")
+        if approver:
+            excluded.append(("the plan's approver", approver))
+        for role, name in excluded:
+            if normalise_actor(actor) == normalise_actor(name):
+                raise GateError(
+                    "dual_control_excluded_actor",
+                    f"review acceptance refused: {actor!r} is "
+                    f"{role} ({name!r}); under dual control the "
+                    f"actor who created the object under decision "
+                    f"may not decide its acceptance",
+                )
+
+    def _refuse_unanswered_challenges(
+        self, work_order_id: str, run: dict
+    ) -> None:
+        """Round 13's bar, factored out: it stands at acceptance
+        however acceptance is reached — one decision, or the
+        second of two."""
+        open_must = self._open_must_answer(work_order_id, run["run_id"])
+        if open_must:
+            rules = ", ".join(sorted({c["rule"] for c in open_must}))
+            raise GateError(
+                "unanswered_challenges",
+                f"review acceptance refused: run {run['run_id']} "
+                f"carries {len(open_must)} unanswered must-answer "
+                f"challenge(s) ({rules}) — answer each one "
+                f"(rebut it with its counter-evidence, downgrade "
+                f"it with a reason, or accept and revise) before "
+                f"the patch can be accepted",
+            )
+
+    def _complete_acceptance(
+        self,
+        order: dict,
+        run: dict,
+        *,
+        actor: str,
+        first_actor: str | None = None,
+    ) -> dict:
+        """Acceptance itself: the patch is exported, the order
+        closes accepted, and the act is audited — with both
+        deciders named when dual control carried it."""
+        work_order_id = order["work_order_id"]
+        artifact = self.settings.artifacts_dir / f"{work_order_id}.patch"
+        artifact.write_text(run["patch"])
+        self._set_status(order, "accepted")
+        detail: dict = {}
+        if first_actor is not None:
+            detail = {
+                "first_actor": first_actor,
+                "second_actor": actor,
+            }
+        self._audit(
+            "work_order", work_order_id, "review_accepted", actor,
+            run_id=run["run_id"], artifact=str(artifact), **detail,
+        )
+        log_event("review_accepted", work_order_id=work_order_id)
+        return self.store.get_work_order(work_order_id)
+
     def decide_review(
         self,
         work_order_id: str,
@@ -4065,7 +4468,15 @@ class CodingService:
         send-back — and it refuses by name where no succeeded run
         exists to send back. A request without a note refuses: the
         note is the decision's content, and a silent send-back would
-        leave the next plan drafting against nothing."""
+        leave the next plan drafting against nothing.
+
+        Under a deployment profile that requires dual control
+        (round 18), acceptance takes two decisions: the first
+        parks the act — the order stands
+        ``awaiting_second_acceptance``, the patch unexported — and
+        a second, different, non-excluded actor completes it.
+        Reject is never dual-controlled: one recorded rejection
+        closes an order, parked or not."""
         order = self._require_order(work_order_id)
         run = self.store.latest_run(work_order_id)
         if decision is None:
@@ -4109,6 +4520,24 @@ class CodingService:
                 )
             self._apply_request_changes(order, run, actor=actor, note=note)
             return self.store.get_work_order(work_order_id)
+        if order["status"] == "awaiting_second_acceptance":
+            # Round 18: a first acceptance stands parked on this
+            # order. The act completes, closes, or is refused from
+            # here — it never falls through to the single-decision
+            # path below.
+            return self._decide_parked_acceptance(
+                order, run, decision=decision, actor=actor, reason=reason
+            )
+        if (
+            order["status"] == "accepted"
+            and self._dual_control_required()
+        ):
+            raise GateError(
+                "dual_control_already_decided",
+                f"work order {work_order_id} already stands "
+                f"accepted on two recorded decisions; a completed "
+                f"act under dual control takes no further decision",
+            )
         if order["status"] != "succeeded" or run is None:
             raise GateError(
                 "no_verified_run_awaiting_review",
@@ -4121,35 +4550,131 @@ class CodingService:
             # must-answer challenge refuses the accept by name —
             # the reviewer answers it (rebut, downgrade, or
             # accept-and-revise) or the patch does not land.
-            open_must = self._open_must_answer(work_order_id, run["run_id"])
-            if open_must:
-                rules = ", ".join(
-                    sorted({c["rule"] for c in open_must})
+            self._refuse_unanswered_challenges(work_order_id, run)
+            if self._dual_control_required():
+                # Round 18: the first decision parks the act. The
+                # patch is NOT exported and the order does not
+                # close — it names the state it waits in, and the
+                # decision stands on record as its own act.
+                self._refuse_if_acceptance_excluded(order, run, actor)
+                self._set_status(order, "awaiting_second_acceptance")
+                self._audit(
+                    "work_order", work_order_id,
+                    "review_acceptance_parked", actor,
+                    run_id=run["run_id"],
                 )
-                raise GateError(
-                    "unanswered_challenges",
-                    f"review acceptance refused: run {run['run_id']} "
-                    f"carries {len(open_must)} unanswered must-answer "
-                    f"challenge(s) ({rules}) — answer each one "
-                    f"(rebut it with its counter-evidence, downgrade "
-                    f"it with a reason, or accept and revise) before "
-                    f"the patch can be accepted",
+                log_event(
+                    "review_acceptance_parked",
+                    work_order_id=work_order_id,
                 )
-            artifact = self.settings.artifacts_dir / f"{work_order_id}.patch"
-            artifact.write_text(run["patch"])
-            self._set_status(order, "accepted")
-            self._audit(
-                "work_order", work_order_id, "review_accepted", actor,
-                run_id=run["run_id"], artifact=str(artifact),
+                return self.store.get_work_order(work_order_id)
+            return self._complete_acceptance(order, run, actor=actor)
+        self._set_status(order, "rejected")
+        self._audit(
+            "work_order", work_order_id, "review_rejected", actor,
+            run_id=run["run_id"], reason=reason,
+        )
+        log_event("review_rejected", work_order_id=work_order_id)
+        return self.store.get_work_order(work_order_id)
+
+    def _decide_parked_acceptance(
+        self,
+        order: dict,
+        run: dict | None,
+        *,
+        decision: str,
+        actor: str,
+        reason: str | None,
+    ) -> dict:
+        """A decision on a parked acceptance. A reject closes the
+        act as rejected — both decisions stand on record, the
+        parked one in its own audit row. An accept completes the
+        act only from a second, different, non-excluded actor:
+        the same actor again refuses by name, and so does the
+        order's requester or the plan's approver. The challenge
+        bar is re-checked at completion: answering a challenge
+        between the two decisions is exactly the flow the park
+        exists to allow, and a challenge raised on the records
+        must never be waved through by a decision already parked."""
+        work_order_id = order["work_order_id"]
+        parked = (
+            self._acceptance_standing(work_order_id, run["run_id"])
+            if run is not None
+            else None
+        )
+        if parked is None:
+            raise GateError(
+                "dual_control_no_parked_act",
+                f"work order {work_order_id} stands "
+                f"awaiting_second_acceptance but no parked first "
+                f"decision is on its record; the act cannot be "
+                f"completed from a record that does not carry it",
             )
-            log_event("review_accepted", work_order_id=work_order_id)
-        else:
+        if decision == "reject":
             self._set_status(order, "rejected")
             self._audit(
                 "work_order", work_order_id, "review_rejected", actor,
                 run_id=run["run_id"], reason=reason,
+                parked_first_actor=parked["first_actor"],
             )
             log_event("review_rejected", work_order_id=work_order_id)
+            return self.store.get_work_order(work_order_id)
+        if normalise_actor(actor) == normalise_actor(
+            parked["first_actor"]
+        ):
+            raise GateError(
+                "dual_control_same_actor",
+                f"review acceptance refused: {actor!r} recorded "
+                f"the first acceptance of work order "
+                f"{work_order_id}; under dual control the second "
+                f"decision must come from a different actor",
+            )
+        self._refuse_if_acceptance_excluded(order, run, actor)
+        self._refuse_unanswered_challenges(work_order_id, run)
+        return self._complete_acceptance(
+            order, run, actor=actor, first_actor=parked["first_actor"]
+        )
+
+    def withdraw_review_acceptance(
+        self, work_order_id: str, *, actor: str
+    ) -> dict:
+        """Withdraw a parked first acceptance — the decider's own
+        undo, and only theirs. The order returns to ``succeeded``
+        (the run again awaits review, undecided) and the
+        withdrawal is recorded; the withdrawn decision stays on
+        the audit record, because history is not edited here."""
+        order = self._require_order(work_order_id)
+        run = self.store.latest_run(work_order_id)
+        parked = (
+            self._acceptance_standing(work_order_id, run["run_id"])
+            if run is not None
+            else None
+        )
+        if order["status"] != "awaiting_second_acceptance" or parked is None:
+            raise GateError(
+                "dual_control_no_parked_act",
+                f"work order {work_order_id} has no parked "
+                f"acceptance to withdraw (status {order['status']})",
+            )
+        if normalise_actor(actor) != normalise_actor(
+            parked["first_actor"]
+        ):
+            raise GateError(
+                "dual_control_not_the_decider",
+                f"withdrawal refused: the parked acceptance of "
+                f"work order {work_order_id} was recorded by "
+                f"{parked['first_actor']!r}; a decision is its "
+                f"decider's to withdraw, and no one else's",
+            )
+        self._set_status(order, "succeeded")
+        self._audit(
+            "work_order", work_order_id,
+            "review_acceptance_withdrawn", actor,
+            run_id=run["run_id"],
+        )
+        log_event(
+            "review_acceptance_withdrawn", work_order_id=work_order_id
+        )
         return self.store.get_work_order(work_order_id)
 
     def _apply_request_changes(
@@ -4585,6 +5110,41 @@ class CodingService:
                         "hidden_verdict": verification.get("hidden_verdict"),
                     },
                 }
+            elif status == "awaiting_second_acceptance" and run is not None:
+                # Round 18: a first acceptance stands parked on
+                # this order. The next act is still the review —
+                # a second, different reviewer accepts, or any
+                # reviewer rejects — and the entry names the state
+                # and the first decider it waits on, so the queue
+                # never presents a parked act as an ordinary
+                # awaiting-review item. The first decider may also
+                # withdraw; available_acts names it (it is the
+                # decider's own act, not the queue's next act).
+                verification = run.get("verification") or {}
+                standing = self._acceptance_standing(wid, run["run_id"])
+                entry = {
+                    "category": "awaiting_second_acceptance",
+                    "next_act": "review",
+                    "available_acts": ["review", "withdraw_acceptance"],
+                    "run_id": run["run_id"],
+                    "plan_version": run["plan_version"],
+                    "first_actor": (
+                        standing["first_actor"] if standing else None
+                    ),
+                    "unanswered_must_answer": len(
+                        self._open_must_answer(wid, run["run_id"])
+                    ),
+                    "changed_files": list(run.get("changed_files") or []),
+                    "risk_flags": {
+                        "test_surface_touched": bool(
+                            verification.get("test_surface_touched")
+                        ),
+                        "unplanned_files": list(
+                            verification.get("unplanned_files") or []
+                        ),
+                        "hidden_verdict": verification.get("hidden_verdict"),
+                    },
+                }
             elif status == "failed" and run is not None:
                 failure_class, detail = self._run_failure_class(run)
                 entry = {
@@ -4745,6 +5305,21 @@ class CodingService:
             "changes_since_previous": self._packet_changes(
                 runs, run, decisions
             ),
+            # Round 18: the run's acceptance standing under dual
+            # control — the requirement in force, and the parked
+            # first decision when one stands (who recorded it,
+            # when). Folded from the audit records, like every
+            # other standing in this packet.
+            "dual_control": {
+                "required": self._dual_control_required(),
+                "acceptance": (
+                    self._acceptance_standing(
+                        work_order_id, run["run_id"]
+                    )
+                    if run is not None
+                    else None
+                ),
+            },
         }
         return packet
 

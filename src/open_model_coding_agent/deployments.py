@@ -27,7 +27,14 @@ small governed vocabulary —
   profile without its key) or ``required`` (a live profile's key
   must be present);
 - ``endpoint``: ``any`` or ``not_baseten`` (the effective endpoint's
-  host must not be baseten.co or one of its subdomains).
+  host must not be baseten.co or one of its subdomains);
+- ``dual_control``: ``off`` or ``required`` (round 18 — when
+  required, the two consequential acceptance acts, review
+  acceptance and model promotion/rollback, complete only on two
+  recorded decisions by different actors, neither of them the
+  actor who created the object being decided; see
+  :meth:`.service.CodingService.decide_review` and
+  :meth:`.service.CodingService.promote`).
 
 Each rule kind has exactly one checker in the table below, driven
 by the record's declared value: a new deployment profile is new
@@ -72,6 +79,7 @@ _RULE_VALUES: dict[str, tuple[str, ...]] = {
     "store": ("any", "postgres"),
     "api_key": ("profile", "required"),
     "endpoint": ("any", "not_baseten"),
+    "dual_control": ("off", "required"),
 }
 
 
@@ -224,11 +232,25 @@ def _check_endpoint(requires: str, model_profile: ModelProfile, store_kind: str,
     return "satisfied", f"the endpoint host {host!r} is not a Baseten host"
 
 
+def _check_dual_control(requires: str, model_profile: ModelProfile, store_kind: str, environ: Mapping[str, str]) -> tuple[str, str]:
+    # Dual control binds behaviour at the gates, not the shape of
+    # the configuration, so no configuration violates it: the
+    # checker's work is to state, in the readiness read, exactly
+    # what the record binds. The enforcement itself lives at the
+    # two gates (review acceptance, promotion), which read the
+    # requirement off the loaded record — the same record this
+    # evaluation reports.
+    if requires == "off":
+        return "satisfied", "dual control is off: review acceptance and promotion complete on one recorded decision"
+    return "satisfied", "dual control is required: review acceptance and promotion (incl. rollback) each complete only on two recorded decisions by different actors, neither the actor who created the object decided"
+
+
 _CHECKERS: dict[str, Callable[..., tuple[str, str]]] = {
     "model": _check_model,
     "store": _check_store,
     "api_key": _check_api_key,
     "endpoint": _check_endpoint,
+    "dual_control": _check_dual_control,
 }
 
 

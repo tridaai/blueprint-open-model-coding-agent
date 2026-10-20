@@ -18,6 +18,7 @@ from .errors import GateError
 from .logging_setup import request_id_var
 from .model_port import PlanDraft, PlanStepDraft
 from .models import (
+    AcceptanceWithdrawIn,
     AmendPlanIn,
     BatchCancelIn,
     BatchDriveIn,
@@ -29,6 +30,8 @@ from .models import (
     EvaluateIn,
     PlanDecisionIn,
     PromoteIn,
+    PromotionRejectIn,
+    PromotionWithdrawIn,
     ReviewDecisionIn,
     RollbackIn,
     RunAbandonIn,
@@ -126,6 +129,16 @@ def create_app(settings=None) -> FastAPI:
     @app.post("/api/promotions/rollback")
     def rollback(body: RollbackIn):
         return service.rollback(actor=body.actor, rationale=body.rationale)
+
+    @app.post("/api/promotions/reject-decision")
+    def reject_promotion_decision(body: PromotionRejectIn):
+        return service.reject_promotion_decision(
+            actor=body.actor, reason=body.reason
+        )
+
+    @app.post("/api/promotions/withdraw-decision")
+    def withdraw_promotion_decision(body: PromotionWithdrawIn):
+        return service.withdraw_promotion_decision(actor=body.actor)
 
     # -- shortlist comparisons (round 8) ------------------------------------
     @app.post("/api/comparisons", status_code=201)
@@ -354,6 +367,14 @@ def create_app(settings=None) -> FastAPI:
             actor=body.actor,
             reason=body.reason,
             decision=body.decision,
+        )
+
+    @app.post("/api/work-orders/{work_order_id}/review/withdraw-acceptance")
+    def withdraw_review_acceptance(
+        work_order_id: str, body: AcceptanceWithdrawIn
+    ):
+        return service.withdraw_review_acceptance(
+            work_order_id, actor=body.actor
         )
 
     # -- the challenge pass (round 13) --------------------------------------

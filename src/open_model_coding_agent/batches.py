@@ -130,6 +130,7 @@ NEXT_ACT_BY_STATUS = {
 AWAITING_PERSON = {
     "plan_ready": "plan_awaiting_approval",
     "succeeded": "awaiting_review",
+    "awaiting_second_acceptance": "awaiting_second_acceptance",
     "interrupted": "run_interrupted",
     "failed": "run_failed",
 }

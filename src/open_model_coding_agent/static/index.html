@@ -197,6 +197,18 @@ async function loadPromotion() {
     <div class="muted" style="margin-top:4px">Benchmark sets — ${sets}. Promotion is judged
       on the held-out set only, scored by the worst of 3 runs, against the
       incumbent's own recorded baseline.</div>`;
+  const dc = state.dual_control || {};
+  if (dc.parked_act) {
+    const p = dc.parked_act;
+    html += `<div style="margin-top:8px"><strong>Dual control: a ${esc(p.kind)} stands parked</strong> —
+      ${esc(p.from_profile)} → ${esc(p.to_profile)}, first decided by ${esc(p.first_actor)}
+      at ${esc(p.at)}. The default has not moved; a second, different actor must repeat
+      the act to complete it, or the act is rejected or withdrawn from the API.</div>`;
+  } else if (dc.required) {
+    html += `<div class="muted" style="margin-top:8px">Dual control is required under the
+      deployment profile in force: promotion and rollback each take two recorded
+      decisions by different actors.</div>`;
+  }
   const evals = state.evaluations || [];
   if (evals.length) {
     html += `<table style="margin-top:10px">
@@ -316,6 +328,14 @@ async function loadQueue() {
         } else if (e.category === "awaiting_review") {
           const f = e.risk_flags || {};
           detail = `run on plan v${e.plan_version} · changed: ${(e.changed_files || []).map(esc).join(", ")}` +
+            (e.unanswered_must_answer ? ` · <span class="bad">${e.unanswered_must_answer} unanswered challenge(s) block acceptance</span>` : ``) +
+            (f.test_surface_touched ? ` · <span class="bad">test surface touched</span>` : ``) +
+            ((f.unplanned_files || []).length ? ` · <span class="bad">unplanned files: ${f.unplanned_files.map(esc).join(", ")}</span>` : ``) +
+            (f.hidden_verdict ? ` · hidden re-grade: ${esc(f.hidden_verdict)}` : ``);
+        } else if (e.category === "awaiting_second_acceptance") {
+          const f = e.risk_flags || {};
+          detail = `run on plan v${e.plan_version} · changed: ${(e.changed_files || []).map(esc).join(", ")}` +
+            ` · <strong>first acceptance recorded by ${esc(e.first_actor || "?")} — dual control awaits a second, different reviewer</strong>` +
             (e.unanswered_must_answer ? ` · <span class="bad">${e.unanswered_must_answer} unanswered challenge(s) block acceptance</span>` : ``) +
             (f.test_surface_touched ? ` · <span class="bad">test surface touched</span>` : ``) +
             ((f.unplanned_files || []).length ? ` · <span class="bad">unplanned files: ${f.unplanned_files.map(esc).join(", ")}</span>` : ``) +
@@ -550,6 +570,7 @@ async function loadDigest() {
     <div><strong>${d.runs.total} run(s)</strong> <span class="muted">(${counts(d.runs.by_status)})</span></div>
     <div class="muted">plan decisions — drafted ${d.plan_decisions.drafted} · approved ${d.plan_decisions.approved} · rejected ${d.plan_decisions.rejected} · amended ${d.plan_decisions.amended}</div>
     <div class="muted">review decisions — accepted ${d.review_decisions.accepted} · rejected ${d.review_decisions.rejected} · changes requested ${d.review_decisions.changes_requested}</div>
+    <div class="muted">dual control — ${d.dual_control.required ? "required" : "off"} · acceptances parked ${d.dual_control.acceptances_parked} · withdrawn ${d.dual_control.acceptances_withdrawn} · promotion decisions parked ${d.dual_control.promotion_decisions_parked} · rejected ${d.dual_control.promotion_decisions_rejected} · withdrawn ${d.dual_control.promotion_decisions_withdrawn}</div>
     <div class="muted">challenges — ${d.challenges.raised} raised · ${d.challenges.outstanding.open} outstanding (${d.challenges.outstanding.must_answer} must-answer, ${d.challenges.outstanding.advisory} advisory)</div>
     <div class="muted">batches — ${d.batches.total} (${counts(d.batches.by_standing)}), ${d.batches.items} item(s)</div>
     <div class="muted">usage — ${d.usage.calls} call(s) · ${d.usage.tokens} provider token(s) · priced cost $${esc(d.cost.priced_cost)}` +
@@ -708,6 +729,19 @@ async function showDetail(id) {
         <button class="secondary" onclick="requestChanges('${id}')">Request changes</button>
         <button class="danger" onclick="decideReview('${id}', false)">Reject patch</button></div>`;
     }
+    if (o.status === "awaiting_second_acceptance") {
+      const parkedAcc = (packet && packet.dual_control && packet.dual_control.acceptance) || {};
+      html += `<div style="margin-top:10px">
+        <strong>Dual control: a first acceptance stands parked</strong> — recorded by
+        ${esc(parkedAcc.first_actor || "?")} at ${esc(parkedAcc.at || "")}. The patch is
+        not exported yet. A second, different reviewer accepts to complete the act, or
+        any reviewer rejects to close it; the first reviewer may withdraw their
+        decision, which returns the order to undecided.
+        <div style="margin-top:6px">
+        <button onclick="decideReview('${id}', true)">Accept patch (second decision)</button>
+        <button class="secondary" onclick="withdrawAcceptance('${id}')">Withdraw my acceptance</button>
+        <button class="danger" onclick="decideReview('${id}', false)">Reject patch</button></div></div>`;
+    }
     if (o.status === "rejected") {
       html += `<div style="margin-top:10px">
         <button class="secondary" onclick="requestChanges('${id}')">Request changes instead</button></div>
@@ -857,6 +891,10 @@ async function decidePlan(id, approve) {
 async function decideReview(id, accept) {
   await act(`/api/work-orders/${id}/review`,
     { accept, actor, reason: accept ? null : "rejected in console" }, id);
+}
+
+async function withdrawAcceptance(id) {
+  await act(`/api/work-orders/${id}/review/withdraw-acceptance`, { actor }, id);
 }
 
 async function requestChanges(id) {

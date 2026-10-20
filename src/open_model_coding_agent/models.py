@@ -277,6 +277,29 @@ class RollbackIn(BaseModel):
     rationale: str
 
 
+class PromotionRejectIn(BaseModel):
+    """The adverse close of a parked promotion-gate act (round 18):
+    who rejects it, and why — both recorded beside the parked
+    decision it closes."""
+
+    actor: str
+    reason: str | None = None
+
+
+class PromotionWithdrawIn(BaseModel):
+    """Withdrawal of a parked promotion-gate act (round 18) by the
+    actor who recorded it — the only actor who may."""
+
+    actor: str
+
+
+class AcceptanceWithdrawIn(BaseModel):
+    """Withdrawal of a parked review acceptance (round 18) by the
+    reviewer who recorded it — the only actor who may."""
+
+    actor: str
+
+
 class TaskTemplate(BaseModel):
     """A task template: a governed, versioned record in the task
     library. The patterns are the template — a task text with named
