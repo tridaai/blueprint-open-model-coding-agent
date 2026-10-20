@@ -1825,6 +1825,145 @@ def challenge_pass_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def batch_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 14: batch work orders, driven as an operator drives
+    them — a mixed batch (one gold task, one template
+    instantiation onto its gold task) submitted whole, driven to
+    the plan gate, approved outside the batch one order at a
+    time, driven again to verified runs, and read back as one
+    folded report. The batch approves nothing at any point."""
+    from open_model_coding_agent.models import BatchIn, BatchItemIn
+
+    service = _offline_service(scratch, "batch")
+    gold_task = suite.get("low-stock-report")
+    template_task = suite.get("reserve-overcommit")
+    parameters = {
+        "module": "inventory",
+        "behaviour": (
+            "a reservation can commit more units than are "
+            "available, so available stock goes negative"
+        ),
+    }
+    orders_before = len(service.list_work_orders())
+    refused = None
+    try:
+        service.create_batch(
+            BatchIn(
+                name="eval bad batch",
+                actor="evals",
+                items=[
+                    BatchItemIn(
+                        kind="gold", gold_task_id=gold_task.id
+                    ),
+                    BatchItemIn(
+                        kind="gold", gold_task_id="no-such-task"
+                    ),
+                ],
+            )
+        )
+    except GateError as exc:
+        refused = exc.code
+    check(
+        "batch: one invalid item refuses the whole submission",
+        refused == "unknown_gold_task"
+        and len(service.list_work_orders()) == orders_before
+        and service.store.list_batches() == [],
+        "the valid item was not created either — validation "
+        "precedes creation, and no batch record stands",
+    )
+
+    report = service.create_batch(
+        BatchIn(
+            name="eval batch",
+            actor="evals",
+            budget={"max_model_calls": 500},
+            items=[
+                BatchItemIn(kind="gold", gold_task_id=gold_task.id),
+                BatchItemIn(
+                    kind="template",
+                    template_name="guard-clause-fix",
+                    parameters=parameters,
+                    gold_task_id=template_task.id,
+                ),
+            ],
+        )
+    )
+    batch = report["batch"]
+    batch_id = batch["batch_id"]
+    wids = [item["work_order_id"] for item in batch["items"]]
+    orders = [service.get_work_order(wid) for wid in wids]
+    check(
+        "batch: a mixed submission creates ordinary orders, provenanced",
+        [item["kind"] for item in batch["items"]] == ["gold", "template"]
+        and all(
+            order["batch"]
+            == {"batch_id": batch_id, "name": "eval batch", "index": i}
+            for i, order in enumerate(orders)
+        )
+        and orders[1]["template"]["name"] == "guard-clause-fix"
+        and all(order["status"] == "draft" for order in orders)
+        and batch["budget"]["max_model_calls"] == 500,
+        "gold + template items through ordinary intake, each "
+        "carrying the batch's id, name, and its index",
+    )
+
+    drive = service.drive_batch(batch_id, actor="evals")
+    queue = service.review_queue()
+    check(
+        "batch: the driver stops every item at the plan gate",
+        [e["action"] for e in drive["entries"]]
+        == ["drafted_plan", "drafted_plan"]
+        and all(
+            e["stopped_at"] == "plan_gate" for e in drive["entries"]
+        )
+        and all(
+            service.get_work_order(wid)["status"] == "plan_ready"
+            for wid in wids
+        )
+        and all(service.store.list_runs(wid) == [] for wid in wids)
+        and all(
+            entry["batch"]["batch_id"] == batch_id
+            for entry in queue["entries"]
+        ),
+        "both plans drafted by the pass; nothing approved, "
+        "nothing run; the queue names the batch on each entry",
+    )
+
+    for wid in wids:
+        service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+    drive = service.drive_batch(batch_id, actor="evals")
+    report = service.get_batch(batch_id)
+    check(
+        "batch: approvals outside the batch let the next pass run",
+        [e["action"] for e in drive["entries"]] == ["ran", "ran"]
+        and report["runs"]["succeeded"] == 2
+        and report["runs"]["failures_by_class"] == {}
+        and report["challenges_outstanding"]["open_must_answer"] == 0
+        and report["spend"]["model_calls"] > 0
+        and report["cost"]["successful_tasks"] == 2
+        and {a["work_order_id"] for a in report["awaiting_person"]}
+        == set(wids)
+        and all(
+            a["category"] == "awaiting_review"
+            for a in report["awaiting_person"]
+        ),
+        "two verified runs, the report folding runs, spend, and "
+        "the two reviews the batch now waits on",
+    )
+
+    for wid in wids:
+        service.decide_review(wid, accept=True, actor="Eval Reviewer")
+    report = service.get_batch(batch_id)
+    check(
+        "batch: the report reads complete when every item lands",
+        report["status"] == "complete"
+        and report["awaiting_person"] == []
+        and report["counts"]["by_order_status"] == {"accepted": 2},
+        "completion is derived from the items' own records — "
+        "the batch record was never told the work finished",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -1956,6 +2095,7 @@ def main() -> int:
     review_workbench_leg(suite, scratch, check)
     template_library_leg(suite, scratch, check)
     challenge_pass_leg(suite, scratch, check)
+    batch_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")

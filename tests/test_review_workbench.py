@@ -178,12 +178,25 @@ def test_queue_age_is_time_in_the_current_state(service):
 
 def test_no_bulk_decision_route_exists(settings):
     """The route table is the proof: every decision route is a POST
-    on ONE work order; the queue and the history are reads only."""
+    on ONE work order; the queue and the history are reads only.
+    Round 14's batch routes stand beside this guarantee, so the
+    marker is precise: no route offers a bulk decision, and the
+    batch acts — submission, drive, cancel, release — contain no
+    decision verb at all; a drive drafts and runs, it never
+    decides."""
     app = create_app(settings)
     routes = [(r.path, set(r.methods or ())) for r in app.routes]
     for path, _methods in routes:
         assert "bulk" not in path
-        assert "batch" not in path
+    batch_posts = [
+        path
+        for path, methods in routes
+        if "POST" in methods and path.startswith("/api/batches")
+    ]
+    assert batch_posts  # the batch acts exist (round 14)
+    for path in batch_posts:
+        for verb in ("review", "decide", "approve", "accept", "reject"):
+            assert verb not in path
     decision_posts = [
         path
         for path, methods in routes
