@@ -152,6 +152,7 @@ from open_model_coding_agent.deployments import (  # noqa: E402
 )
 from open_model_coding_agent.errors import ConfigError, GateError  # noqa: E402
 from open_model_coding_agent.gold import GoldSuite  # noqa: E402
+from open_model_coding_agent.mcp_server import McpSurface  # noqa: E402
 from open_model_coding_agent.model_port import (  # noqa: E402
     OfflineScriptedModel,
     PlanDraft,
@@ -2205,6 +2206,116 @@ def deployment_profiles_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def mcp_surface_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 17: the MCP surface, driven as a machine client drives
+    it — JSON-RPC messages in, results out. One session submits a
+    work order through the door, drafts its plan, and reads the
+    review packet back; the trail shows the channel; a call to a
+    decision-shaped name is refused by name; and at the end the
+    plan still stands undecided, awaiting a person — the surface
+    prepared the work and moved no gate."""
+    service = _offline_service(scratch, "mcp-surface")
+    surface = McpSurface(service)
+    task = suite.get("reserve-overcommit")
+
+    def rpc(method, params=None):
+        return surface.handle(
+            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or {}}
+        )
+
+    def call_tool(name, arguments):
+        return rpc("tools/call", {"name": name, "arguments": arguments})
+
+    def tool_payload(response):
+        return json.loads(response["result"]["content"][0]["text"])
+
+    hello = rpc("initialize", {"protocolVersion": "2025-03-26"})["result"]
+    listed = rpc("tools/list")["result"]["tools"]
+    check(
+        "mcp: the handshake and the list state the boundary",
+        hello["protocolVersion"] == "2025-03-26"
+        and [tool["name"] for tool in listed]
+        == [
+            "list_work_orders",
+            "get_work_order",
+            "get_review_packet",
+            "get_review_queue",
+            "get_operations_digest",
+            "get_cost_report",
+            "create_work_order",
+            "draft_plan",
+        ],
+        "eight tools: six reads, intake, drafting — nothing that decides",
+    )
+
+    created = call_tool(
+        "create_work_order",
+        {
+            "actor": "evals-mcp",
+            "gold_task_id": task.id,
+            "title": task.title,
+            "task_text": task.task_text,
+            "file_scope": list(task.file_scope),
+        },
+    )
+    order = tool_payload(created)
+    wid = order["work_order_id"]
+    events = service.audit(wid)
+    check(
+        "mcp: the submission lands through ordinary intake, channel on the trail",
+        created["result"]["isError"] is False
+        and order["requested_by"] == "evals-mcp"
+        and any(
+            event["event"] == "work_order_created"
+            and event["actor"] == "evals-mcp"
+            for event in events
+        )
+        and any(
+            event["event"] == "mcp_work_order_created"
+            and event["detail"].get("channel") == "mcp"
+            and event["detail"].get("tool") == "create_work_order"
+            for event in events
+        ),
+        f"order {wid} created by evals-mcp, its trail naming the mcp channel",
+    )
+
+    drafted = call_tool(
+        "draft_plan", {"actor": "evals-mcp", "work_order_id": wid}
+    )
+    plan = tool_payload(drafted)
+    packet = tool_payload(call_tool("get_review_packet", {"work_order_id": wid}))
+    check(
+        "mcp: the draft and the packet read back through the surface",
+        drafted["result"]["isError"] is False
+        and plan["version"] == 1
+        and packet["plan"]["version"] == 1
+        and packet["work_order"]["work_order_id"] == wid,
+        "the drafted plan is the packet's plan",
+    )
+
+    refused = call_tool("decide_plan", {"work_order_id": wid})
+    standing = service.get_work_order(wid)
+    stored_plan = service.store.get_plan(wid)
+    gate_refused = False
+    try:
+        service.start_run(wid, actor="evals")
+    except GateError as exc:
+        gate_refused = exc.code == "plan_not_approved"
+    check(
+        "mcp: a decision-shaped call is refused by name, and the plan awaits a human",
+        refused["error"]["code"] == -32602
+        and refused["error"]["message"].startswith(
+            "governed_act_not_a_tool: 'decide_plan'"
+        )
+        and standing["status"] == "plan_ready"
+        and stored_plan["status"] == "draft"
+        and stored_plan["decided_by"] is None
+        and gate_refused,
+        "no tool approved anything: the order stands plan_ready, "
+        "the plan undecided, execution still refused",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -2339,6 +2450,7 @@ def main() -> int:
     batch_leg(suite, scratch, check)
     observability_leg(suite, scratch, check)
     deployment_profiles_leg(suite, scratch, check)
+    mcp_surface_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
