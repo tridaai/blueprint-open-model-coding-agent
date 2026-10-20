@@ -95,6 +95,7 @@ class Settings:
     model_profile: str = "offline"
     profiles_dir: Path = field(default_factory=lambda: REPO_ROOT / "profiles")
     prices_dir: Path = field(default_factory=lambda: REPO_ROOT / "prices")
+    taxonomy_dir: Path = field(default_factory=lambda: REPO_ROOT / "taxonomy")
     # Test seam: an injected HTTP transport for the live adapter.
     # Never set from the environment; production uses the real one.
     model_transport: object | None = field(default=None, repr=False)
@@ -140,6 +141,7 @@ def load_settings(**overrides) -> Settings:
         "model_profile": os.environ.get("MODEL_PROFILE", "offline"),
         "profiles_dir": Path(os.environ.get("PROFILES_DIR", REPO_ROOT / "profiles")),
         "prices_dir": Path(os.environ.get("PRICES_DIR", REPO_ROOT / "prices")),
+        "taxonomy_dir": Path(os.environ.get("TAXONOMY_DIR", REPO_ROOT / "taxonomy")),
         "migrations_dir": Path(os.environ.get("MIGRATIONS_DIR", REPO_ROOT / "migrations")),
         "gold_dir": Path(os.environ.get("GOLD_DIR", REPO_ROOT / "evals" / "gold")),
         "targets_dir": Path(os.environ.get("TARGETS_DIR", REPO_ROOT / "data" / "targets")),
