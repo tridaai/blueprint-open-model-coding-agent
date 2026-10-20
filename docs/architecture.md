@@ -1240,6 +1240,73 @@ content hash readiness reports exists so a drifted record is
 moving, the hash in readiness changes with them, next to the
 version it claims.
 
+## The MCP surface (round 17)
+
+Machine clients — an MCP host: an IDE, a desktop assistant,
+another agent — meet the shell under the opposite contract to a
+raw tool bridge. The founding rule: **clients submit work and
+read standing; they never decide.** The eight tools in
+`mcp_server.py` are six reads and two preparatory acts:
+`list_work_orders`, `get_work_order`, `get_review_packet`,
+`get_review_queue`, `get_operations_digest`, `get_cost_report`,
+`create_work_order`, and `draft_plan`. No tool approves or
+rejects a plan, starts, resumes, or abandons a run, decides a
+review, answers a challenge, promotes or rolls back a profile,
+benchmarks or compares, drives or cancels a batch, or creates,
+publishes, or instantiates a template. There is no handler
+behind which such an act could hide: the tool registry is the
+whole surface, the suite asserts its contents by enumeration,
+and a call to a decision-shaped name (`decide_plan`,
+`start_run`, …) is refused by name as
+`governed_act_not_a_tool`, with the boundary restated.
+
+Every tool is a thin adapter onto the same service the API
+serves — no second implementation of any logic. The two writes
+enter through doors on the service (`create_work_order_mcp`,
+`draft_plan_mcp`): the ordinary act, under the caller's explicit
+`actor` argument, plus one trail entry (`mcp_work_order_created`,
+`mcp_plan_drafted`) carrying `channel: "mcp"` and the tool's
+name. An MCP submission is therefore judged exactly as an API
+submission is — the door's actor becomes the order's
+`requested_by`, the ordinary audit event carries that actor —
+and the order's history shows where each act came from. Drafting
+through the door proposes; it never decides: the returned plan
+stands `draft`, undecided, and execution from it is refused
+`plan_not_approved` until a person approves it through the API
+or the console.
+
+Errors keep the shell's own voice. A governance refusal is a
+tool *result* with `isError` set and the refusal verbatim in the
+standing `code: message` form — the call was well-formed, the
+shell declined, and the rule is named. A malformed call is a
+protocol error, also named: an unknown tool or a missing or
+mistyped argument at -32602 (`unknown_tool`, `invalid_params`
+naming the argument), an unknown method at -32601, a non-JSON
+line at -32700 — and the stdio loop survives every one of them.
+Reads of an unknown order refuse as `unknown_work_order`, the
+same code the API's 404 carries.
+
+The protocol is the repo's own code, deliberately. The round's
+survey tried the official `mcp` Python SDK first: it is absent
+from the locked environment; the 1.x line resolves against the
+frozen pydantic 2.14.0 pin and fails at import (FastMCP reaches
+for a private pydantic helper pydantic 2.14 removed — the
+failure blueprint #13 recorded), and the 2.x line restructures
+the API wholesale and would add some twenty-eight packages to
+an exactly-pinned environment. Three JSON-RPC methods do not
+justify moving a frozen pin or adopting a shifting SDK.
+Implemented and claimed, no more: stdio transport, one JSON-RPC
+2.0 message per line; `initialize` (protocol versions
+`2024-11-05` and `2025-03-26`, capabilities `{tools: {}}`, and
+instructions stating the founding rule), `ping`, `tools/list`,
+`tools/call`; notifications answered with silence; tool results
+as one text content block carrying the JSON payload. No
+resources, no prompts, no sampling, no HTTP transport. The
+surface is stateless per call beyond the store; two clients
+share nothing but the records. There is no auth layer: actors
+are recorded, not authenticated — the standing caveat of the
+whole blueprint, stated again in Honest limits.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
@@ -1406,3 +1473,11 @@ prod smoke).
   batch's wall figure excludes the time its items spent
   waiting on people at gates — it is work time, not elapsed
   calendar time, and it reads as such.
+- The MCP surface (round 17) is stdio only and carries no auth
+  layer: any process that can spawn the server can submit work
+  under any actor name, exactly as any caller of the API can
+  today. Actors everywhere in this blueprint are recorded, not
+  authenticated — the trail answers "under what name" honestly
+  and "proven how" not at all. A deployment that exposes either
+  surface beyond a trusted host owes it an authenticating
+  front door; the gates here govern acts, not identities.

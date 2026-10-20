@@ -117,6 +117,39 @@ The default profile is `baseten-deepseek` and the default task is
 the shell's named refusal and exits non-zero — no traceback, and
 no silent fallback to the offline model.
 
+## Machine clients (the MCP surface)
+
+Round 17 adds an MCP surface for machine clients — an IDE, a
+desktop assistant, another agent. It speaks stdio JSON-RPC and
+boots on the same settings as the API, so the deployment profile
+in force binds it too:
+
+```bash
+uv run coding-agent mcp    # or: python -m open_model_coding_agent.mcp_server
+```
+
+Point any MCP host at that command. The contract is the surface's
+founding rule: **a client may state work and read what the shell
+made of it — it may never approve, execute, or decide.** The
+eight tools are `list_work_orders`, `get_work_order`,
+`get_review_packet`, `get_review_queue`, `get_operations_digest`,
+and `get_cost_report` (reads, over the same folds the console
+reads), plus `create_work_order` and `draft_plan` — intake and
+plan drafting, the two preparatory acts, each taking an explicit
+`actor` that is recorded exactly as the API records it, with the
+MCP channel named on the order's audit trail. There is no tool
+for plan approval or rejection, run execution, review decisions,
+challenge dispositions, promotion, batch driving, or template
+publishing: those stay human acts in the console or the API, and
+a call to a decision-shaped name is refused by name.
+
+Honest status, plainly: the transport is stdio only (no HTTP),
+and there is no auth layer — actor names are recorded, not
+authenticated, the standing caveat of this blueprint. The
+protocol is a small hand-rolled JSON-RPC implementation in the
+repo's own code (the architecture doc records why the official
+SDK was not adopted against the frozen dependency pins).
+
 ## Quickstart
 
 ```bash
@@ -432,6 +465,23 @@ make serve       # API + console on http://localhost:8000
     states; the console header and the operations digest name
     it; and every run record is stamped with the deployment
     profile it ran under.
+16. **The MCP surface (round 17).** Machine clients — an IDE, a
+    desktop assistant, another agent — get a surface under the
+    opposite contract to a raw tool bridge: **clients submit
+    work and read standing; they never decide.** Eight tools
+    over stdio JSON-RPC: six reads (`list_work_orders`,
+    `get_work_order`, `get_review_packet`, `get_review_queue`,
+    `get_operations_digest`, `get_cost_report`) riding the same
+    folds the console reads, and two preparatory acts
+    (`create_work_order`, `draft_plan`) that enter through doors
+    on the service as the ordinary acts under the caller's name,
+    with the channel on the audit trail. No tool approves a
+    plan, starts a run, decides a review, answers a challenge,
+    promotes a model, drives a batch, or publishes a template —
+    a call to a decision-shaped name is refused by name. A plan
+    drafted here still awaits a person's approval; a governance
+    refusal returns in the shell's own words, never as a stack
+    trace. See "Machine clients" below for how to run it.
 
 ## The gold suite (v1)
 
@@ -485,8 +535,8 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–16 plus the live-wiring round are built and gated:
-**253 tests passing, evals PASS**
+Rounds 1–17 plus the live-wiring round are built and gated:
+**265 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -640,9 +690,17 @@ naming `hosted` or `hosted-self` binds production rules at
 startup (live model, Postgres, key present — the self-hosted
 shape also refuses a Baseten endpoint host), enforced when
 settings load and reported per rule in readiness, with every
-run stamped with the profile it ran under. What is
+run stamped with the profile it ran under. The MCP surface
+(round 17) then opened the shell to machine clients under the
+opposite contract to a raw tool bridge: eight stdio tools —
+six reads over the console's own folds, plus intake and plan
+drafting through service doors that record the channel on the
+audit trail — and no tool that approves, executes, or decides,
+with decision-shaped calls refused by name and a session leg
+that ends with the plan still awaiting a human. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: the MCP surface (round 17). The Postgres
+`docs/architecture.md`: dual control at the plan gate
+(round 18). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.
