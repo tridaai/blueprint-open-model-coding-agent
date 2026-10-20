@@ -1162,6 +1162,84 @@ now, with the same fields their audit records carry. Refusals
 are not logged — they are audit-and-409 business, and the digest
 counts failures from the records, not the log.
 
+## Deployment profiles (round 16)
+
+The model profiles govern which model serves; a deployment
+profile governs the shape of the deployment itself — and naming
+one binds its rules. A deployment profile is a governed record
+(`profiles/deployment/<name>.json`, `deployments.py`), loaded
+fail-closed in the model profiles' mould: an unknown name, an
+unknown field, a rule kind the loader does not recognise, a rule
+left undeclared, or a requirement value outside the governed
+vocabulary each refuse by name at startup. Three shapes ship:
+
+- **`local`** (the default) — the developer's machine: the
+  offline scripted model or a live profile may serve, the store
+  is SQLite or a Postgres the developer points at, and no key is
+  required beyond what the selected model profile itself
+  demands. Every existing test and eval path runs under it
+  unless it opts in to another name.
+- **`hosted`** — the production shape on Baseten's Model APIs:
+  a live model profile must serve, the store is Postgres
+  (`DATABASE_URL` set), and the serving profile's key must be
+  present.
+- **`hosted-self`** — production against a self-hosted
+  OpenAI-compatible endpoint, reached by repointing a live
+  profile with `BASETEN_BASE_URL`: like hosted, and the
+  endpoint's host must not be baseten.co or one of its
+  subdomains.
+
+The rules are declared on the record as values from a small
+vocabulary — `model` (`any`|`live`), `store` (`any`|`postgres`),
+`api_key` (`profile`|`required`), `endpoint` (`any`|`not_baseten`)
+— and each kind has exactly one checker in code, driven by the
+record's declared value. A new deployment shape is new data;
+only a genuinely new rule kind costs a new checker. Selection is
+by `DEPLOYMENT_PROFILE` (with `DEPLOYMENT_PROFILES_DIR` pointing
+at a deployment's own records, the way `PROFILES_DIR` does for
+model profiles).
+
+**Enforcement is at settings load, not at first use.** When
+settings load, the record resolves fail-closed and every rule is
+evaluated against the configuration as it stands — the effective
+model profile (overrides applied), the store kind, the
+environment. A violated rule is a `ConfigError` naming the
+deployment profile and each violated rule with what was found,
+raised before the app serves anything: a deployment that calls
+itself hosted does not get to run the offline model against
+SQLite because nobody checked. The evaluation cannot be bypassed
+with settings overrides — the rules are checked against the
+final settings, so an override that would downgrade the store
+under `hosted` refuses the same way an environment that never
+set `DATABASE_URL` does.
+
+**The active profile is visible.** `/readiness` reports the
+deployment profile's name, version, and content hash (SHA-256 of
+the record file) and re-evaluates its rules live — the same
+evaluation the loader enforced, so the states an operator reads
+are the states that were enforced — with any violated rule named
+among the readiness problems. The console's header line shows
+the profile and its version; the operations digest names it
+alongside the taxonomy version. And every run record is stamped
+`deployment_profile` at launch: the same run reads differently
+under local and hosted rules, and the record says which governed
+it. The stamp is an additive payload field (runs are JSON
+payloads in both store dialects — no migration); records written
+before this round carry the model's default, `local`, and
+truthfully — every one of them ran under what is now named
+local.
+
+**Version discipline.** Deployment records are governed data
+like the price table and the taxonomy: a rule change is a new
+version of the record, never a quiet edit of the version in
+force. There is deliberately no hash pinning — no governed data
+in this repo pins a content hash, and inventing one here would
+make this record stricter than the discipline around it. The
+content hash readiness reports exists so a drifted record is
+*visible*: if a record's rules change without its version
+moving, the hash in readiness changes with them, next to the
+version it claims.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
@@ -1213,6 +1291,17 @@ prod smoke).
   live conformance run is the release round's gate (R20), following
   the sibling blueprints' discipline of never claiming a profile
   that has not run.
+- Deployment-profile enforcement lives where the deployment
+  boots: `load_settings`, the path the app, the CLI, and the
+  smoke tool all start through. Code that constructs a `Settings`
+  object directly (the test suite does, deliberately) names its
+  deployment profile on the object and takes the record as named;
+  the rules are a startup discipline for deployments, not a
+  second gate inside the service. The eval gate's deployment
+  leg states its own deviation openly: the eval environment has
+  no Postgres, so its hosted serve runs on the harness's SQLite
+  store under the hosted boot's record — the hosted shape's
+  Postgres conformance is the same R20 gate as the adapter's.
 - The digest is a fold, and folds cost reads: over a deployment's
   full history every digest request re-reads the run, usage,
   audit, challenge, and batch records. That is the accepted price

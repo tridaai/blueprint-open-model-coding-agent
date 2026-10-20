@@ -89,6 +89,14 @@ cp .env.example .env   # then set BASETEN_API_KEY
   OpenAI-compatible endpoint) join the profile loader as the rounds
   land — the profile is the seam, and it is fail-closed: an unknown
   profile name is a startup error, never a fallback.
+- **Deployment profiles** — `DEPLOYMENT_PROFILE` names the
+  deployment's shape (`local` by default; `hosted` for production
+  on Baseten's Model APIs; `hosted-self` for a self-hosted
+  endpoint), as governed records in `profiles/deployment/`.
+  Naming one binds its rules at startup — under `hosted` the
+  offline model and the SQLite store each refuse by name before
+  anything serves. See "Deployment profiles" in
+  `docs/architecture.md`.
 
 ## The live smoke check (operators)
 
@@ -405,6 +413,25 @@ make serve       # API + console on http://localhost:8000
     and the audit found the plan lifecycle was the one governed
     act that audited without logging; plan drafts, decisions
     and amendments log now, like everything else.
+15. **Deployment profiles (round 16).** The deployment's shape is
+    a governed record too (`profiles/deployment/`), and naming
+    one binds its rules: **`local`** (the default — offline or
+    live model, SQLite or Postgres, no key beyond the model
+    profile's own rule), **`hosted`** (production on Baseten's
+    Model APIs — a live profile must serve, Postgres is
+    required, the key must be present), and **`hosted-self`**
+    (production on a self-hosted endpoint — like hosted, and the
+    endpoint's host must not be a Baseten host). The records are
+    loaded fail-closed — an unknown name, field, or rule refuses
+    at startup — and every rule is enforced when settings load,
+    not at first use: a configuration that violates a rule of
+    the profile it names (`DEPLOYMENT_PROFILE`) refuses before
+    anything serves, naming the profile and the rule. The
+    active profile is visible everywhere it matters: readiness
+    reports its name, version, content hash, and per-rule
+    states; the console header and the operations digest name
+    it; and every run record is stamped with the deployment
+    profile it ran under.
 
 ## The gold suite (v1)
 
@@ -446,6 +473,7 @@ src/open_model_coding_agent/  the governance shell (service, gates,
                               model port, Baseten adapter, store,
                               API, console)
 profiles/                     the model profiles, as versioned records
+                              (deployment profiles in profiles/deployment/)
 prices/                       the governed price table, as versioned records
 workshop/                     the sample codebase the agent works on
 evals/gold/                   the gold task suite (broken/fixed/grading)
@@ -457,8 +485,8 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–15 plus the live-wiring round are built and gated:
-**231 tests passing, evals PASS**
+Rounds 1–16 plus the live-wiring round are built and gated:
+**253 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -499,7 +527,15 @@ item refusing the batch with nothing created), driven to the
 plan gate and stopped there, approved outside the batch one
 order at a time, driven again to two verified runs, and read
 back as one folded report whose completion is derived from
-the items' own records).
+the items' own records, and a deployment leg where the
+settings boot under the hosted profile with a complete fake
+env and every declared rule stands satisfied, the same boot
+without DATABASE_URL refuses naming the deployment profile
+and the store rule, and a gold task serves end to end under
+the hosted profile with the deployment stamp on its run
+record — the leg's one deviation stated in it: the eval
+environment has no Postgres, so its serving store is the
+harness's SQLite under the hosted boot's record).
 The default model profile is now earned, not configured: the gold
 suite is split tuning/held-out under content hashes, a profile is
 benchmarked through the real service path with the records
@@ -598,9 +634,15 @@ stops at every human gate and approves nothing, under a batch
 budget folded from the items' own usage that stops unstarted
 items at batch level when it is spent, with cancellation that
 marks only what never started and a report that folds the
-whole submission into one honest page. What is
+whole submission into one honest page. Deployment profiles
+(round 16) then made the deployment itself a governed record:
+naming `hosted` or `hosted-self` binds production rules at
+startup (live model, Postgres, key present — the self-hosted
+shape also refuses a Baseten endpoint host), enforced when
+settings load and reported per rule in readiness, with every
+run stamped with the profile it ran under. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: observability (round 15). The Postgres
+`docs/architecture.md`: the MCP surface (round 17). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.
