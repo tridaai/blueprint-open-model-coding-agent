@@ -96,6 +96,9 @@
     </div>
   </div>
 
+  <h2>Operations digest — the deployment at a glance</h2>
+  <div id="digest"><div class="muted">loading…</div></div>
+
   <div id="detail"></div>
 </main>
 <footer>
@@ -130,7 +133,11 @@ async function loadReadiness() {
   $("readiness").textContent =
     `store: ${r.store} · model profile: ${r.model_profile}` +
     ` · default profile: ${r.default_model_profile}` +
-    (r.baseten_model ? ` · Baseten default slug: ${r.baseten_model}` : "");
+    (r.baseten_model ? ` · Baseten default slug: ${r.baseten_model}` : "") +
+    ` · price table v${r.price_table_version} · taxonomy v${r.taxonomy_version}` +
+    (r.status === "ready"
+      ? " · ready"
+      : ` · NOT READY: ${(r.problems || []).join("; ")}`);
 }
 
 async function loadGold() {
@@ -532,6 +539,49 @@ async function createFromGold(id) {
   } catch (e) { showError(e); }
 }
 
+async function loadDigest() {
+  const d = await api("/api/operations-digest");
+  const f = d.failures || {};
+  const counts = (obj) => Object.entries(obj || {})
+    .map(([k, v]) => `${esc(k.replaceAll("_", " "))}: ${v}`).join(" · ") || "none";
+  let html = `
+  <div class="card">
+    <div><strong>${d.runs.total} run(s)</strong> <span class="muted">(${counts(d.runs.by_status)})</span></div>
+    <div class="muted">plan decisions — drafted ${d.plan_decisions.drafted} · approved ${d.plan_decisions.approved} · rejected ${d.plan_decisions.rejected} · amended ${d.plan_decisions.amended}</div>
+    <div class="muted">review decisions — accepted ${d.review_decisions.accepted} · rejected ${d.review_decisions.rejected} · changes requested ${d.review_decisions.changes_requested}</div>
+    <div class="muted">challenges — ${d.challenges.raised} raised · ${d.challenges.outstanding.open} outstanding (${d.challenges.outstanding.must_answer} must-answer, ${d.challenges.outstanding.advisory} advisory)</div>
+    <div class="muted">batches — ${d.batches.total} (${counts(d.batches.by_standing)}), ${d.batches.items} item(s)</div>
+    <div class="muted">usage — ${d.usage.calls} call(s) · ${d.usage.tokens} provider token(s) · priced cost $${esc(d.cost.priced_cost)}` +
+    (d.cost.cost_per_successful_task !== null && d.cost.cost_per_successful_task !== undefined
+      ? ` · cost per successful task $${esc(d.cost.cost_per_successful_task)}` : ` · no verified successes yet`) + `</div>
+  </div>`;
+  if ((f.classes || []).length) {
+    html += `
+    <table>
+      <thead><tr><th>Failure class</th><th>Count</th><th>Names</th></tr></thead>
+      <tbody>${f.classes.map((c) => `
+        <tr><td>${esc(c.label)}</td><td>${c.count}</td>
+          <td class="muted">${c.names.map(esc).join(", ")}</td></tr>`).join("")}
+      </tbody></table>`;
+  }
+  if ((f.top || []).length) {
+    html += `
+    <table>
+      <thead><tr><th>Failure</th><th>Class</th><th>Count</th><th>Likely cause</th><th>Operator's next action</th></tr></thead>
+      <tbody>${f.top.map((t) => `
+        <tr><td>${esc(t.name)}</td><td>${esc(t.class_label)}</td><td>${t.count}</td>
+          <td>${esc(t.cause)}</td><td>${esc(t.action)}</td></tr>`).join("")}
+      </tbody></table>`;
+  }
+  const unclassified = Object.keys(f.unclassified || {});
+  if (unclassified.length) {
+    html += `<div class="card"><span class="bad">Unclassified failure name(s): ${unclassified.map(esc).join(", ")}</span>
+      <div class="muted">Records the shipped taxonomy does not carry yet — counted, never dropped. The taxonomy's next published version classifies them.</div></div>`;
+  }
+  html += `<div class="muted">${esc(d.derivation)}</div>`;
+  $("digest").innerHTML = html;
+}
+
 async function loadOrders() {
   const orders = await api("/api/work-orders");
   $("orders").innerHTML = orders.map((o) => `
@@ -556,6 +606,7 @@ async function act(path, body, id) {
     await loadCosts();
     await loadTemplates();
     await loadBatches();
+    await loadDigest();
     await showDetail(id);
   } catch (e) { showError(e); }
 }
@@ -834,7 +885,7 @@ async function answerChallenge(id, challengeId, kind) {
   await act(`/api/work-orders/${id}/challenges/${challengeId}/answer`, body, id);
 }
 
-loadReadiness(); loadGold(); loadOrders(); loadQueue(); loadCosts(); loadPromotion(); loadComparisons(); loadTemplates(); loadBatches();
+loadReadiness(); loadGold(); loadOrders(); loadQueue(); loadCosts(); loadPromotion(); loadComparisons(); loadTemplates(); loadBatches(); loadDigest();
 </script>
 </body>
 </html>
