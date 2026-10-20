@@ -220,6 +220,7 @@ from .benchmarks import (
 )
 from .challenges import compute_challenges
 from .config import Settings, load_settings, resolve_profile
+from .deployments import evaluate_rules, violated_rules
 from .errors import ConfigError, GateError
 from .gold import GoldSuite
 from .logging_setup import log_event
@@ -707,6 +708,8 @@ class CodingService:
         return {
             "window": {"since": since, "until": until},
             "taxonomy_version": self.taxonomy.version,
+            "deployment_profile": self.settings.deployment.name,
+            "deployment_profile_version": self.settings.deployment.version,
             "runs": {"total": len(runs), "by_status": runs_by_status},
             "failures": {
                 "total": sum(failures_by_name.values()),
@@ -769,14 +772,17 @@ class CodingService:
 
     def readiness(self) -> dict:
         """The deployment's readiness, probed live and reported by
-        name — never as a stack trace. Three probings: the store
+        name — never as a stack trace. Four probings: the store
         answers and its migrations stand current against the ones
         on disk; the serving profile can actually serve (a live
         profile recorded not servable, or missing its key, is
-        not-ready with the reason named); and the governed data in
+        not-ready with the reason named); the governed data in
         force (the price table's version; the taxonomy's, in the
-        digest). ``/health`` stays the cheap liveness check; this
-        is the deployment check."""
+        digest); and the deployment profile (round 16) — its name,
+        version, and content hash, with every declared rule
+        re-evaluated live and any violated rule named as a problem.
+        ``/health`` stays the cheap liveness check; this is the
+        deployment check."""
         problems: list[str] = []
         try:
             migrations = self.store.migration_status()
@@ -819,12 +825,36 @@ class CodingService:
             problems.append(f"the serving profile cannot serve: "
                             f"{profile_reason}")
 
+        # Round 16: the deployment profile in force, with its rules
+        # re-evaluated live — the same evaluation settings load
+        # enforced, probed again here so the read reports the
+        # states as they stand, per rule, with the record's version
+        # and content hash naming exactly which record governs.
+        deployment = self.settings.deployment
+        deployment_rules = evaluate_rules(
+            deployment,
+            model_profile=(
+                profile if profile is not None else self.settings.profile
+            ),
+            store_kind=self.settings.store_kind,
+            environ=os.environ,
+        )
+        for state in violated_rules(deployment_rules):
+            problems.append(
+                f"deployment profile {deployment.name!r} rule "
+                f"{state['rule']!r} is violated: {state['detail']}"
+            )
+
         return {
             "status": "ready" if not problems else "not_ready",
             "store": self.settings.store_kind,
             "store_reachable": store_reachable,
             "store_error": store_error,
             "migrations": migrations,
+            "deployment_profile": deployment.name,
+            "deployment_profile_version": deployment.version,
+            "deployment_profile_hash": deployment.content_hash,
+            "deployment_rules": deployment_rules,
             "model_profile": self.serving_profile_id(),
             "model_label": profile.label if profile is not None else None,
             "model_state": {
@@ -3057,6 +3087,7 @@ class CodingService:
                 work_order_id=work_order_id,
                 plan_version=plan["version"],
                 model_profile=self.serving_profile_id(),
+                deployment_profile=self.settings.deployment.name,
                 workspace=str(workspace),
                 budget=self._budget_snapshot(),
                 created_at=utcnow(),

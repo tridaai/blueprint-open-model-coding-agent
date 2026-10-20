@@ -135,6 +135,7 @@ async function loadReadiness() {
     ` · default profile: ${r.default_model_profile}` +
     (r.baseten_model ? ` · Baseten default slug: ${r.baseten_model}` : "") +
     ` · price table v${r.price_table_version} · taxonomy v${r.taxonomy_version}` +
+    ` · deployment profile: ${r.deployment_profile} v${r.deployment_profile_version}` +
     (r.status === "ready"
       ? " · ready"
       : ` · NOT READY: ${(r.problems || []).join("; ")}`);

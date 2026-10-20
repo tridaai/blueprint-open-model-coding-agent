@@ -140,6 +140,14 @@ class Run(BaseModel):
     work_order_id: str
     plan_version: int
     model_profile: str
+    # Round 16 — the deployment profile the run ran under, stamped
+    # at launch from the settings in force: the record says which
+    # governed shape the run executed under (local, hosted,
+    # hosted-self). An additive payload field — no migration, the
+    # payload is JSON in both dialects. Records written before
+    # round 16 carry the default, and truthfully: every one of
+    # them ran under what is now named local.
+    deployment_profile: str = "local"
     # running | succeeded | failed | interrupted | abandoned
     status: str = "running"
     workspace: str = ""

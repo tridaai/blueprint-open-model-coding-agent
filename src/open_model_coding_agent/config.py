@@ -13,6 +13,14 @@ against the profile's own record: ``BASETEN_MODEL`` may pin another
 slug only inside the selected profile's allowlist, and
 ``BASETEN_BASE_URL`` may repoint the endpoint (another Baseten
 deployment of the same APIs). Neither can widen a profile.
+
+The deployment itself is a profile too (round 16, see
+:mod:`.deployments`): ``DEPLOYMENT_PROFILE`` names the deployment's
+shape — ``local`` by default — and naming it binds its rules. The
+rules are evaluated here, at load, against the effective model
+profile, the store kind, and the environment: a configuration that
+violates a rule of the profile it names is a ConfigError before
+anything serves, never a surprise at first use.
 """
 
 from __future__ import annotations
@@ -21,6 +29,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .deployments import DeploymentProfile, evaluate_rules, violated_rules
+from .deployments import load_deployment_profile as _load_deployment_record
 from .errors import ConfigError
 from .profiles import ModelProfile, apply_overrides
 from .profiles import load_profile as _load_profile_record
@@ -93,6 +103,10 @@ class Settings:
     sqlite_path: str = "./data/codingagent.db"
     database_url: str | None = None
     model_profile: str = "offline"
+    deployment_profile: str = "local"
+    deployment_profiles_dir: Path = field(
+        default_factory=lambda: REPO_ROOT / "profiles" / "deployment"
+    )
     profiles_dir: Path = field(default_factory=lambda: REPO_ROOT / "profiles")
     prices_dir: Path = field(default_factory=lambda: REPO_ROOT / "prices")
     taxonomy_dir: Path = field(default_factory=lambda: REPO_ROOT / "taxonomy")
@@ -110,6 +124,9 @@ class Settings:
     _effective_profile: ModelProfile | None = field(
         default=None, repr=False, compare=False
     )
+    _deployment: DeploymentProfile | None = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def store_kind(self) -> str:
@@ -120,6 +137,14 @@ class Settings:
         if self._effective_profile is not None:
             return self._effective_profile
         return load_profile(self.model_profile, self.profiles_dir)
+
+    @property
+    def deployment(self) -> DeploymentProfile:
+        if self._deployment is not None:
+            return self._deployment
+        return _load_deployment_record(
+            self.deployment_profile, self.deployment_profiles_dir
+        )
 
 
 def _int_env(name: str, default: int) -> int:
@@ -139,6 +164,12 @@ def load_settings(**overrides) -> Settings:
         "sqlite_path": os.environ.get("SQLITE_PATH", "./data/codingagent.db"),
         "database_url": os.environ.get("DATABASE_URL") or None,
         "model_profile": os.environ.get("MODEL_PROFILE", "offline"),
+        "deployment_profile": os.environ.get("DEPLOYMENT_PROFILE", "local"),
+        "deployment_profiles_dir": Path(
+            os.environ.get(
+                "DEPLOYMENT_PROFILES_DIR", REPO_ROOT / "profiles" / "deployment"
+            )
+        ),
         "profiles_dir": Path(os.environ.get("PROFILES_DIR", REPO_ROOT / "profiles")),
         "prices_dir": Path(os.environ.get("PRICES_DIR", REPO_ROOT / "prices")),
         "taxonomy_dir": Path(os.environ.get("TAXONOMY_DIR", REPO_ROOT / "taxonomy")),
@@ -182,4 +213,32 @@ def load_settings(**overrides) -> Settings:
                 f"{effective.api_key_env} set in the environment; refusing "
                 f"to start without it (no silent fallback to offline)"
             )
+    # Round 16: the deployment profile's rules bind at load, not at
+    # first use. The record resolves fail-closed (an unknown name
+    # refuses, listing the valid ones), and every declared rule is
+    # evaluated against the configuration as it stands — the
+    # effective model profile, the store kind, the environment. A
+    # violated rule refuses here, naming the deployment profile and
+    # the rule, before the app serves anything.
+    deployment = _load_deployment_record(
+        settings.deployment_profile, settings.deployment_profiles_dir
+    )
+    settings._deployment = deployment
+    states = evaluate_rules(
+        deployment,
+        model_profile=settings.profile,
+        store_kind=settings.store_kind,
+        environ=os.environ,
+    )
+    violated = violated_rules(states)
+    if violated:
+        listing = "; ".join(
+            f"rule {state['rule']!r} requires {state['requires']!r} — "
+            f"{state['detail']}"
+            for state in violated
+        )
+        raise ConfigError(
+            f"deployment profile {deployment.name!r} refuses this "
+            f"configuration: {listing}"
+        )
     return settings

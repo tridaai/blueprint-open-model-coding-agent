@@ -17,9 +17,15 @@ services:
     build: .
     environment:
       DATABASE_URL: postgresql://codingagent:codingagent@db:5432/codingagent
-      # Round 1 runs the labelled offline profile; set MODEL_PROFILE=baseten
-      # and BASETEN_API_KEY once the live adapter lands in round 2.
+      # The labelled offline profile serves in this stack as shipped.
       MODEL_PROFILE: offline
+      # The deployment profile (round 16; records in
+      # profiles/deployment/). Naming one binds its rules at
+      # startup: flip this to hosted together with a live
+      # MODEL_PROFILE and a BASETEN_API_KEY — while the named
+      # profile's rules are violated (offline model, missing key),
+      # the app refuses to start, by name.
+      DEPLOYMENT_PROFILE: local
     ports:
       - "8000:8000"
     depends_on:
