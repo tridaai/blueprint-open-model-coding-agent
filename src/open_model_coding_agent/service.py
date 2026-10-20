@@ -2701,6 +2701,48 @@ class CodingService:
             batch_provenance=batch_provenance,
         )
 
+    def create_work_order_mcp(self, body: WorkOrderIn, actor: str) -> dict:
+        """The MCP surface's door onto intake (round 17). The act is
+        the ordinary ``create_work_order`` — same validation, same
+        records, same audit event with the same actor — plus one
+        trail entry naming the channel and the tool, so a reader of
+        the order's history can tell where the submission came
+        from without the act itself being judged any differently.
+        The door's ``actor`` is authoritative: it becomes the
+        order's ``requested_by``, exactly as the API's create makes
+        the body's requester the actor of record."""
+        body = body.model_copy(update={"requested_by": actor})
+        order = self.create_work_order(body, actor=actor)
+        self._audit(
+            "work_order",
+            order["work_order_id"],
+            "mcp_work_order_created",
+            actor,
+            channel="mcp",
+            tool="create_work_order",
+        )
+        return order
+
+    def draft_plan_mcp(self, work_order_id: str, actor: str) -> dict:
+        """The MCP surface's door onto plan drafting (round 17).
+        Drafting is a preparatory act — it proposes; it never
+        decides — so a machine client may ask for a draft. The act
+        is the ordinary ``draft_plan`` under the caller's name, plus
+        the channel's trail entry. The plan the door returns still
+        stands undecided: approval is a human act, and no door on
+        this service leads to it from the MCP surface."""
+        plan = self.draft_plan(work_order_id, actor=actor)
+        self._audit(
+            "work_order",
+            work_order_id,
+            "mcp_plan_drafted",
+            actor,
+            channel="mcp",
+            tool="draft_plan",
+            version=plan["version"],
+        )
+        return plan
+
     def _materialise_target(self, task) -> Path:
         """The task's repo on disk: the workshop, with the broken
         overlay applied. This directory is the 'developer's repo' the

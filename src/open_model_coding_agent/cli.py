@@ -1,4 +1,5 @@
-"""Command line: run the demo, or list the gold suite."""
+"""Command line: run the demo, list the gold suite, or serve the
+MCP surface over stdio."""
 
 from __future__ import annotations
 
@@ -16,6 +17,10 @@ def main(argv: list[str] | None = None) -> int:
 
         demo_main()
         return 0
+    if command == "mcp":
+        from .mcp_server import main as mcp_main
+
+        return mcp_main()
     if command == "gold":
         settings = load_settings()
         suite = GoldSuite(settings.gold_dir)
@@ -29,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"gold suite is sound: {len(suite.tasks)} tasks")
         return 0
-    print(f"unknown command {command!r}; use 'demo' or 'gold'")
+    print(f"unknown command {command!r}; use 'demo', 'gold', or 'mcp'")
     return 2
 
 
