@@ -2034,7 +2034,7 @@ def observability_leg(suite: GoldSuite, scratch: Path, check) -> None:
         f"run {interrupted['status']}",
     )
 
-    rejected = service.create_gold_work_order("order-total-rounding", actor="evals")
+    rejected = service.create_gold_work_order("tax-before-discount", actor="evals")
     rwid = rejected["work_order_id"]
     service.draft_plan(rwid, actor="evals")
     service.decide_plan(
