@@ -370,6 +370,41 @@ make serve       # API + console on http://localhost:8000
     by outcome and failure class, challenges outstanding,
     priced cost and cost per verified success across the batch,
     and the items awaiting a person.
+14. **Observability (round 15).** An operator inherits every
+    failure this shell has ever named, so the failures are
+    classified once, in governed data: a versioned **taxonomy**
+    (`taxonomy/taxonomy-v1.json`) maps every failure name — the
+    gate refusals, the tool port's codes, the classes the
+    records carry — to a class, a likely cause, and the
+    operator's next action, loaded fail-closed at startup like
+    the price table. A conformance test derives the names from
+    the code and holds the table to covering all of them; a
+    record carrying a name the table predates classifies as
+    **unclassified** and is counted under its own name — records
+    outlive builds, and nothing is silently dropped. The
+    **operator digest** (`GET /api/operations-digest`, and a
+    section of the console) folds the deployment's standing
+    from the stored records on every read — runs by status and
+    failure class, plan-gate and review decisions (request
+    changes counted as its own decision), challenges raised and
+    outstanding, batch standings, usage, priced cost and cost
+    per verified success, and the top failure names with their
+    next actions — over an optional `created_at` window. There
+    is no metrics table and no stored counter: the digest is a
+    fold, re-derivable like every other read in this shell.
+    **Readiness** deepens to match: `/readiness` probes the
+    store live and reports migration currency (applied vs
+    on-disk versions), the serving profile's servability state
+    by name (a profile recorded not servable, or a live profile
+    missing its key, is not-ready with the reason — never a
+    stack trace), and the price-table and taxonomy versions in
+    force; `/health` stays the cheap liveness check. The JSON
+    log contract is stated and tested — every line carries its
+    timestamp, level, event, request id (the serving request's,
+    or null outside one) and the ids of the entities it touches —
+    and the audit found the plan lifecycle was the one governed
+    act that audited without logging; plan drafts, decisions
+    and amendments log now, like everything else.
 
 ## The gold suite (v1)
 

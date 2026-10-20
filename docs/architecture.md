@@ -95,6 +95,16 @@ in code rather than prompted, and where the rounds go from here.
   live Model APIs catalog on 2026-10-19: the allowlists are
   exactly the verified slugs, and the `baseten-qwen` profile
   stands recorded not servable — the catalog lists no Qwen model.
+- **`taxonomy.py` + `taxonomy/` — the failure taxonomy, as data
+  (round 15).** Every named failure in the codebase — a gate
+  refusal, a tool-port code, a failure class on a stored record —
+  classified once to a class, a likely cause, and the operator's
+  next action, in a versioned JSON record loaded fail-closed at
+  startup. Classification of an unknown name returns the
+  unclassified standing rather than refusing, so records written
+  by a newer build count visibly instead of vanishing; a
+  conformance test derives every raisable name from the code and
+  holds the shipped table to covering them all.
 - **Usage records (`model_usage`, migration 0002).** One row per
   model call: the work order, the run (NULL for plan drafting), the
   profile and slug that served, the counts, and the latency. Live
@@ -1074,6 +1084,84 @@ told the work finished, the fold can see it. The review queue
 and the review packet carry the batch provenance, so a person
 deciding on one order sees the submission it arrived in.
 
+## Observability (round 15)
+
+Three pieces, all in the shell's fold-on-read discipline.
+
+**The failure taxonomy** (`taxonomy.py`, data in
+`taxonomy/taxonomy-v<N>.json`) classifies every named failure in
+the codebase exactly once: a GateError code, a tool-port refusal
+code, or a failure class a stored record carries, mapped to one
+of eight classes (model serving, plan, sandbox/tool,
+verification, budget, gate refusal, run lifecycle, store/infra),
+a likely cause, and the operator's next action. It is governed
+data in the price table's mould — versioned files, never edited
+in place, loaded fail-closed at startup (an entry naming an
+undeclared class, a duplicate name, a version disagreeing with
+its file name, or an entry missing its cause or action each
+refuse by name). Only the highest version is in force:
+classification is a read-time act over records, so there is no
+per-record version to honour the way costing honours old price
+tables. Classification itself never refuses — `classify()` of an
+unknown name returns the **unclassified** standing, and the
+digest counts it under its own name. That direction is
+deliberate: records outlive the build that wrote them, and a
+silent drop would hide exactly the drift an operator needs to
+see. The other direction is held by a conformance test that
+derives the names from the code — AST over the GateError raise
+sites, the tool port's `code=` constants, and the failure-class
+constants the records are built from — and holds the shipped
+table to covering every one. (`config_error` is the one
+deliberate non-derived entry: a ConfigError carries no code, so
+configuration refusals classify under that single name.)
+
+**The operator digest** (`service.operations_digest`,
+`GET /api/operations-digest`) folds the deployment's standing
+from the stored records on every read: runs by status; failures
+by name, by taxonomy class, and unclassified (with the top ten
+names carrying their class, likely cause, and next action);
+plan-gate decisions (drafted, approved, rejected, amended) and
+review decisions (accepted, rejected, changes requested) from
+the audit records; challenges raised, by rule and by status,
+with the outstanding split must-answer vs advisory; batches by
+their derived standing; usage totals; and the priced cost fold
+— the R6 fold over the window's usage rows, with cost per
+verified success counted over the window's SUCCEEDED runs. The
+window (`since`/`until`) filters each family by its own
+`created_at`; an unreadable timestamp or a start after the end
+refuses as `invalid_digest_window`. Two standings are reported
+**as they stand at read time** — a challenge's current status, a
+batch's derived standing — because the fold reads current
+records, and the digest's derivation text says so rather than
+pretending to reconstruct history. There is no metrics table
+and no stored counter anywhere in this design: a stored counter
+could drift from the records it summarises, and the records are
+the evidence.
+
+**Readiness and the log contract.** `/health` stays the cheap
+liveness check. `/readiness` (`service.readiness`) now probes:
+the store answers `migration_status()` (applied versions read
+from `schema_migrations` against the migration files on disk for
+the dialect — the difference named, never a stack trace); the
+serving profile resolves and, when live, is checked for its two
+named not-ready states (recorded `servable: false`, with its
+reason carried from the record; its key env unset, named); and
+the governed versions in force are reported — the price table's
+and the taxonomy's — alongside every field the endpoint has
+always carried. The status is `ready` only when all three
+probings stand clean. The log contract is stated in
+`logging_setup.py` and held by a test that drives one full
+work-order journey through the API and asserts it on every
+captured line: one JSON object with `ts`, `level`, `event`, and
+`request_id` (the serving request's id, or null outside a
+request), plus the ids of the entities the event touches. The
+round's audit of the existing log sites found the plan lifecycle
+was the one governed act that wrote audit records without log
+lines; `plan_drafted`, `plan_decided`, and `plan_amended` log
+now, with the same fields their audit records carry. Refusals
+are not logged — they are audit-and-409 business, and the digest
+counts failures from the records, not the log.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
@@ -1125,6 +1213,17 @@ prod smoke).
   live conformance run is the release round's gate (R20), following
   the sibling blueprints' discipline of never claiming a profile
   that has not run.
+- The digest is a fold, and folds cost reads: over a deployment's
+  full history every digest request re-reads the run, usage,
+  audit, challenge, and batch records. That is the accepted price
+  of never storing a counter that could drift from the evidence —
+  at blueprint scale it is nothing; a deployment that outgrows it
+  should cache the fold, never replace it with stored counters.
+  The window is `created_at`-based, so a decision about work
+  created before the window does not appear in it even when the
+  decision itself lands inside; challenge and batch standings are
+  as they stand at read time, as the digest's own derivation
+  text states.
 - A resumed live-model conversation is rebuilt from the stored
   tool-call records — a faithful rendering of what was called and
   how it came back — not a replay of the earlier attempt's wire
