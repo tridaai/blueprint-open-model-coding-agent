@@ -963,6 +963,117 @@ evidence each rule states, no wider. False negatives are
 accepted by design; the reviewer's eyes remain the last
 reader, now with the challenges in hand.
 
+## Batch work orders (round 14)
+
+**A batch is a named submission of work, stored as one
+record** (`batches`, migration 0009 in both dialects): its
+name, its submitter, an optional budget, and its items — each
+item the specification it was submitted as, the ordinary work
+order it created, and the batch-level state the item stands
+in. It is not the round-8 comparison, and the difference is
+load-bearing: a **comparison** runs model profiles over a
+benchmark set to produce evidence for the promotion gate — it
+creates no work and decides nothing about any task; a
+**batch** submits work to be done and benchmarks nothing. The
+two records never borrow each other's authority: finishing a
+batch promotes no model, and running a comparison creates no
+orders.
+
+**Creation validates whole, then creates.** Every item is
+checked before any is created — its shape first (the kind is
+known; the fields that kind's intake cannot proceed without
+are present), then its semantics against the live records:
+a gold item's task exists; a template item is planned through
+exactly the computation instantiation performs (the published
+version resolved, the parameters validated, the scope
+substituted and re-checked) with nothing created; an ad-hoc
+item naming a gold task names a real one. The first invalid
+item refuses the whole batch, keeping the intake's own
+refusal name with the item's index in the message — a batch
+with one bad item creates nothing, not even a batch record.
+Creation then runs item by item through the ordinary intakes
+(gold, ad-hoc, template instantiation), and each order carries
+the batch's provenance — id, name, index — on its own record,
+beside any template provenance. From that moment an item's
+order is indistinguishable from one that arrived alone: same
+plan gate, same sandbox, same verification, same review.
+
+**The driver advances; it never decides.** A drive pass is a
+recorded act that walks the items in submission order and, per
+item, does only the work that needs no person: draft a plan
+where one is draftable, run an approved plan, and otherwise
+record where the item waits. It stops each item at the gate a
+person owns — the plan decision, the review, the recovery
+decision on an interrupted run — and never approves, reviews,
+resumes, or restarts anything: there is no bulk approval
+anywhere in this round, by construction. The pass runs items
+strictly one at a time; sequential execution is the design,
+not a limitation (the house rule for verification), and there
+is no parallel path. The pass marks itself active on the batch
+record before it starts and clears the mark when it completes,
+storing its run sheet — per item: the act taken, where it
+stopped, the next act — as the batch's `last_drive`. A second
+pass while a mark stands refuses `batch_driver_active`; a pass
+that dies mid-flight leaves its mark standing, saying plainly
+that a driver was here and did not finish, until a person
+releases it (`release_batch_driver`, a recorded act with a
+reason — the dead pass's actor and start time stay in the
+audit trail).
+
+**The batch budget is a fold, checked at item starts.** The
+batch may carry ceilings of its own — model calls, tokens,
+wall seconds — on top of every run's per-run ceilings (round
+6), which still apply inside each item unchanged. Spend is
+folded on read from the items' usage records: model calls are
+every usage row the items' orders recorded, drafting
+included; tokens are provider-measured tokens only (scripted
+character accounting never counts, round 6's rule); wall
+seconds are the sum of the items' runs' active seconds — the
+quantity a run's own ceiling measures (plan drafting is model
+latency recorded per call in usage, not a run, and carries no
+wall record of its own). The fold is checked before the driver
+starts an unstarted item: when it has reached a ceiling, that
+item and every unstarted item after it are marked
+`budget_stopped` **on the batch record** — each order stays in
+its true state (draft, unplanned, unrun; the mark is not a
+fake run or order status) — and the completed pass refuses by
+name, `batch_budget_exhausted`, naming the ceiling, the
+limit, and what was spent. Work already past its plan gate is
+not batch-stopped: it finishes under its own per-run ceilings.
+The batch budget governs starts, the run budgets govern runs —
+the two compose, neither replaces the other.
+
+**Cancellation marks only what never started.** Any named
+actor may cancel a batch — cancellation stops work, it
+approves nothing, and the record names who did it and why (a
+reason is required). Unstarted items are marked `cancelled`
+at batch level; their orders remain readable, never deleted.
+Started items are untouched and finish through their own
+gates. Whether an item has started is itself folded at the
+moment of the mark, from the order's own records — a plan, a
+run, or a single usage row — never stored anywhere as a
+judgement that could drift from the records.
+
+**The report is one honest page, folded on read.**
+`batch_report` derives everything a reader decides from: the
+items with their effective batch state (a stored mark, or
+`started`/`pending` folded from the order's records), each
+order's true status and its next act; runs counted by status
+with failures by the workbench's failure classes; challenges
+outstanding across the batch's orders (round 13); the spend
+fold against the batch's ceilings with the budget stop when
+one stands; the priced cost fold over all the items' usage —
+**cost per verified success across the batch**, the webinar's
+metric at batch scope, with unpriced usage counted and kept
+out of the money exactly as everywhere else; and the items
+awaiting a person, under the workbench's own categories. The
+batch's standing is derived, not stored: `cancelled` when the
+record says so, `complete` when every item is batch-marked or
+its order terminal, `open` otherwise — the record is never
+told the work finished, the fold can see it. The review queue
+and the review packet carry the batch provenance, so a person
+deciding on one order sees the submission it arrived in.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
@@ -1090,3 +1201,20 @@ prod smoke).
   order names, though the model, the target, and the reviewer
   all share the causation; the fold reports the association, it
   does not apportion it.
+- Batch work orders (round 14) orchestrate; they do not
+  parallelise, and the driver is a synchronous in-process pass,
+  not a scheduler: a deployment that wants a batch driven keeps
+  an operator (or a cron) invoking the pass, and the record of
+  each pass is its run sheet on the batch. The one-driver mark
+  is a stored record checked at pass start — two processes
+  racing the same instant could both read it clear; the store's
+  write lock narrows that window but the mark is a governance
+  record, not a distributed lock, and it is not presented as
+  one. The batch budget is checked at item starts, not
+  continuously: a single item's run can carry the fold past a
+  ceiling mid-flight (its own per-run ceilings are the bound
+  there), and the stop lands on the next unstarted item. Wall
+  seconds inherit the runs' active-seconds convention, so a
+  batch's wall figure excludes the time its items spent
+  waiting on people at gates — it is work time, not elapsed
+  calendar time, and it reads as such.

@@ -337,6 +337,39 @@ make serve       # API + console on http://localhost:8000
    pass through — and the binding proof is the gold suite
    itself: all six tasks' verified patches raise **zero**
    must-answer challenges, checked on every eval run.
+13. **Batch work orders (round 14).** Work often arrives in a
+    pile, so a **batch** submits it as one named record — gold
+    tasks, ad-hoc orders, and template instantiations, mixed —
+    with an optional budget of its own. A batch is not a
+    comparison: a comparison benchmarks models and creates no
+    work; a batch creates work and benchmarks nothing.
+    Submission **validates every item first** — an unknown gold
+    task, an unpublished template, a traversal parameter — and
+    the first invalid item refuses the whole batch by name,
+    creating nothing. Each item then becomes an ordinary work
+    order through ordinary intake, carrying the batch's
+    provenance (which the review queue and the review packet
+    show), and is governed exactly as if it had arrived alone.
+    A **sequential driver** advances items one at a time
+    through the acts that need no person — drafting a plan,
+    running an approved plan — and stops each item at the gate
+    a person owns, recording its run sheet on the batch; it
+    never approves, never reviews, and never runs two items at
+    once (sequential is the design, not a limitation), and a
+    second pass while one is recorded active refuses by name.
+    The **batch budget** folds from the items' usage records
+    on read; when the fold reaches a ceiling, the unstarted
+    items are marked `budget_stopped` **on the batch record** —
+    their orders stay in their true state — and the driver
+    refuses to start further items by that name; each run's own
+    ceilings still apply inside its item. **Cancellation** (any
+    named actor, reason recorded) marks only unstarted items;
+    started work is untouched and finishes through its own
+    gates, and cancelled orders are never deleted. The **batch
+    report** folds it all into one page: items by state, runs
+    by outcome and failure class, challenges outstanding,
+    priced cost and cost per verified success across the batch,
+    and the items awaiting a person.
 
 ## The gold suite (v1)
 
@@ -389,8 +422,8 @@ docs/architecture.md          the design, in full
 
 ## Honest status
 
-Rounds 1–12 plus the live-wiring round are built and gated:
-**188 tests passing, evals PASS**
+Rounds 1–14 plus the live-wiring round are built and gated:
+**213 tests passing, evals PASS**
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -425,7 +458,13 @@ order, no plan smuggled, the skeleton labelled as template
 context in the draft, the run verified, the packet naming the
 provenance, and health folding the accepted journey, with an
 unpublished template and a traversal parameter each refusing
-by name).
+by name, and a batch leg where a mixed submission — one gold
+task, one template instantiation — is validated whole (one bad
+item refusing the batch with nothing created), driven to the
+plan gate and stopped there, approved outside the batch one
+order at a time, driven again to two verified runs, and read
+back as one folded report whose completion is derived from
+the items' own records).
 The default model profile is now earned, not configured: the gold
 suite is split tuning/held-out under content hashes, a profile is
 benchmarked through the real service path with the records
@@ -514,9 +553,19 @@ the evidence carries (single-source figures), and grew no
 public surface nobody asked for (unrequested surface) — each
 fired rule a stored challenge a reviewer answers with a
 recorded disposition before acceptance can land, superseded
-with its run and never deleted. What is
+with its run and never deleted. Batch work orders (round 14)
+then let work arrive as a pile without diluting any of it: a
+named submission of gold, ad-hoc, and template items —
+validated whole, the first invalid item refusing the batch
+with nothing created — whose items are ordinary orders
+through ordinary intake, advanced by a sequential driver that
+stops at every human gate and approves nothing, under a batch
+budget folded from the items' own usage that stops unstarted
+items at batch level when it is spent, with cancellation that
+marks only what never started and a report that folds the
+whole submission into one honest page. What is
 deliberately not here yet, by the round map in
-`docs/architecture.md`: batch work orders (round 14). The Postgres
+`docs/architecture.md`: observability (round 15). The Postgres
 profile is code-complete behind the store port (SQLite is the local
 default; `DATABASE_URL` switches) with live Postgres conformance
 scheduled as the release round's gate, as in the sibling blueprints.
