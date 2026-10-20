@@ -16,12 +16,20 @@ COPY --from=build /usr/local/bin/uvicorn /usr/local/bin/coding-agent /usr/local/
 COPY workshop ./workshop
 COPY evals/gold ./evals/gold
 COPY migrations ./migrations
+COPY profiles ./profiles
+COPY prices ./prices
+COPY taxonomy ./taxonomy
 COPY skills ./skills
 RUN mkdir -p /app/data && chown -R appuser:appuser /app/data
 USER appuser
 ENV SQLITE_PATH=/app/data/codingagent.db \
     GOLD_DIR=/app/evals/gold \
     MIGRATIONS_DIR=/app/migrations \
+    PROFILES_DIR=/app/profiles \
+    DEPLOYMENT_PROFILES_DIR=/app/profiles/deployment \
+    PRICES_DIR=/app/prices \
+    TAXONOMY_DIR=/app/taxonomy \
+    SKILLS_DIR=/app/skills \
     TARGETS_DIR=/app/data/targets \
     RUNS_DIR=/app/data/runs \
     ARTIFACTS_DIR=/app/data/artifacts
