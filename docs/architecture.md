@@ -1528,6 +1528,68 @@ under a live profile, is where a method earns or loses its
 claim. The gate's design does not hide this — its record names
 the serving profile it was measured under, beside the hashes.
 
+## Release hardening (round 20)
+
+The last round adds no feature. It makes the release gate
+executable and closes the gaps a final survey found between
+what the repo claims and what it ships.
+
+**The Postgres conformance harness.** The store's Postgres
+profile ran, until this round, on construction and dialect
+review alone — the sibling blueprints' release rounds each
+found a production store that had never actually run, and this
+one was not going to claim otherwise. The harness
+(`tests/test_postgres_conformance.py`, `make conformance`) is
+env-gated on `CODINGAGENT_TEST_DATABASE_URL` naming a scratch
+database — one with "test" in its name — and skips cleanly
+without one. Its guards run before any wipe: a database whose
+name does not look like a test database refuses, and so does
+one that names the same database as the deployment's own
+`DATABASE_URL`. The wipe drops only the tables this blueprint's
+own migrations create — the set is derived from the migration
+files, so it cannot drift from the schema — and the store's
+migration runner then rebuilds from empty. Against the real
+wire the leg proves: the full chain (0001–0010) applies from
+empty; every table family round-trips, the round-1 core and
+the newest tables alike (task templates, run challenges,
+batches, the skills library's evaluations and events); the
+payload columns are TEXT on Postgres exactly as on SQLite, and
+a raw read comes back a string — the wire-shape invariant the
+schema was built on, kept as a regression test rather than an
+assumption; and the hosted profile boots against the real
+store, serves one gold task end to end through a live model
+profile over a fake transport, and has its outcome read back
+by a second, fresh service — the bytes on disk, not one
+process's state. The harness is the gate made executable; it
+runs where a scratch Postgres stands, and no document in this
+repo claims a conformance run that has not happened.
+
+**The prod smoke.** `tools/prod_smoke.py` is the post-deploy
+companion to round 2's live smoke: where that tool proves the
+adapter against the provider's endpoint, this one proves a
+deployment. It builds the service from the deployment's own
+environment, prints the readiness the shell reports, and runs
+one gold task through every gate — order, plan, approval, run,
+verification, review — printing what was recorded. Its bar is
+the deployment serving: a verified run passes; the review
+outcome is reported as it stands (accepted, parked for a
+second decision under dual control, or blocked by unanswered
+challenges), because each of those is governance working, not
+a deployment failing.
+
+**The shipped-image fix.** The survey found the Docker image
+could not have started: the app loads its governed data —
+model profiles, deployment profiles, price tables, taxonomy,
+skills — from directories the image never copied, and the
+repo-root path defaults do not resolve under site-packages.
+The image now copies every runtime data directory and names
+each with its `*_DIR` variable, and a suite test
+(`tests/test_release_hardening.py`) stands guard over both
+that contract and the migration dialects' parity — the same
+versions, the same tables, in both chains. The image build
+itself remains part of hands-on testing, as the README says;
+what the suite can prove statically, it now does.
+
 ## The round map
 
 R1 core · R2 Baseten live path + profiles v1 · R3 plan depth +
@@ -1575,10 +1637,17 @@ prod smoke).
   OS-level isolation; the test child runs the repo's own pytest.
   Network is never invoked by any tool; there is no tool that can
   reach it.
-- The Postgres adapter is code-complete and dialect-reviewed; its
-  live conformance run is the release round's gate (R20), following
-  the sibling blueprints' discipline of never claiming a profile
-  that has not run.
+- The Postgres adapter is code-complete and dialect-reviewed,
+  and round 20 ships its conformance harness (see the release
+  section above): env-gated tests that rebuild the schema from
+  empty on a scratch database, round-trip every table family,
+  assert the payload-TEXT invariant on the wire, and boot the
+  hosted profile against the real store. The harness is the
+  gate made executable — it runs where a scratch Postgres
+  stands, and neither this document nor the README claims a
+  conformance run that has not happened, following the sibling
+  blueprints' discipline of never claiming a profile that has
+  not run.
 - Deployment-profile enforcement lives where the deployment
   boots: `load_settings`, the path the app, the CLI, and the
   smoke tool all start through. Code that constructs a `Settings`
@@ -1589,7 +1658,9 @@ prod smoke).
   leg states its own deviation openly: the eval environment has
   no Postgres, so its hosted serve runs on the harness's SQLite
   store under the hosted boot's record — the hosted shape's
-  Postgres conformance is the same R20 gate as the adapter's.
+  Postgres proof is the round-20 conformance harness's hosted
+  boot, which runs that same serve against the real store
+  wherever a scratch Postgres stands.
 - The digest is a fold, and folds cost reads: over a deployment's
   full history every digest request re-reads the run, usage,
   audit, challenge, and batch records. That is the accepted price

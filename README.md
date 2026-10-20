@@ -592,13 +592,18 @@ evals/gold/                   the gold task suite (broken/fixed/grading)
 evals/run_evals.py            the eval gate
 migrations/                   numbered SQL migrations, both dialects
 tests/                        the shell's own test suite
+tools/                        the operator checks: live_smoke.py (one
+                              gold task against the live endpoint) and
+                              prod_smoke.py (one gold task against a
+                              configured deployment)
 docs/architecture.md          the design, in full
 ```
 
 ## Honest status
 
-Rounds 1–19 plus the live-wiring round are built and gated:
-**309 tests passing, evals PASS**
+Rounds 1–20 plus the live-wiring round are built and gated:
+**311 tests passing, evals PASS** (plus the Postgres conformance
+leg — 4 tests, env-gated, skipped without a scratch database)
 (6/6 gold tasks verified end to end on the offline model, plus one
 gold task end to end through the Baseten adapter's code path, a
 recovery leg where an ambiguous first edit refuses by name and the
@@ -783,18 +788,31 @@ un-publishing the latest published version as a recorded act;
 a skills leg drives the whole path for real: author,
 evaluation, both duty refusals, publication, a mounted gold
 run whose packet carries the stamp, a second version, and the
-rollback. What is
-deliberately not here yet, by the round map in
-`docs/architecture.md`: the
-release-hardening pass (round 20). Dual control at the plan
+rollback. Release hardening
+(round 20) closed the round map: a Postgres conformance
+harness in the suite — env-gated on
+`CODINGAGENT_TEST_DATABASE_URL` naming a scratch database,
+guarded to refuse any database that is not plainly a test one
+— that rebuilds the schema from empty, round-trips every
+table family, asserts the payload-is-TEXT invariant on the
+wire, and boots the hosted profile against the real store to
+serve a gold task; a prod smoke tool (`tools/prod_smoke.py`)
+that runs one gold task through every gate against a
+configured deployment and prints what the shell recorded;
+and a shipped-image fix — the Docker image now carries every
+governed data directory the app loads, with a suite test
+standing guard over the image contract and over migration
+parity between the two dialects. The conformance harness is
+the release gate made executable: it runs where a scratch
+Postgres stands, and this README does not claim a conformance
+run that has not happened. Dual control at the plan
 gate was considered for round 18 and deferred — acceptance
 and promotion carry the second pair of eyes, and the
 reasoning stands in `docs/architecture.md`. The Postgres
 profile is code-complete behind the store port (SQLite is the local
-default; `DATABASE_URL` switches) with live Postgres conformance
-scheduled as the release round's gate, as in the sibling blueprints.
-Docker files are provided and follow the house pattern; the image
-build is part of hands-on testing.
+default; `DATABASE_URL` switches). Docker files are provided
+and follow the house pattern; the image build is part of
+hands-on testing.
 
 ## License
 
