@@ -1964,6 +1964,116 @@ def batch_leg(suite: GoldSuite, scratch: Path, check) -> None:
     )
 
 
+def observability_leg(suite: GoldSuite, scratch: Path, check) -> None:
+    """Round 15: the operator digest over a seeded mixed history.
+
+    One success (accepted), one verification failure, one
+    interrupted run, one plan rejection — the digest must count
+    each family off the records, and every failure the history
+    produced must classify under the shipped taxonomy: an
+    unclassified name here means the taxonomy is behind the code,
+    which is exactly what the leg exists to catch."""
+    service = _offline_service(scratch, "observability")
+    task = suite.get("reserve-overcommit")
+
+    order = service.create_gold_work_order(task.id, actor="evals")
+    wid = order["work_order_id"]
+    service.draft_plan(wid, actor="evals")
+    service.decide_plan(wid, approve=True, actor="Eval Reviewer")
+    run = service.start_run(wid, actor="evals")
+    check(
+        "observability: the seed success verifies",
+        run["status"] == "succeeded",
+        f"run {run['status']}",
+    )
+    service.decide_review(wid, accept=True, actor="Eval Reviewer")
+
+    failing = service.create_gold_work_order(task.id, actor="evals")
+    fwid = failing["work_order_id"]
+    service.draft_plan(fwid, actor="evals")
+    service.decide_plan(fwid, approve=True, actor="Eval Reviewer")
+    bad_script = {
+        "reserve-overcommit": [
+            {
+                "path": "workshop/inventory.py",
+                "old": "        self._reserved[sku] = self._reserved.get(sku, 0) + qty\n        return True",
+                "new": "        self._reserved[sku] = self._reserved.get(sku, 0) + qty\n        return True  # looks fine",
+            }
+        ]
+    }
+    original = service_module.make_model
+    service_module.make_model = (
+        lambda profile_id, scripts=None, **_kw: OfflineScriptedModel(
+            scripts=bad_script
+        )
+    )
+    try:
+        failed = service.start_run(fwid, actor="evals")
+    finally:
+        service_module.make_model = original
+    check(
+        "observability: the seed failure fails verification",
+        failed["status"] == "failed",
+        f"run {failed['status']}",
+    )
+
+    service_module.make_model = (
+        lambda profile_id, scripts=None, **_kw: _DiesAfterFirstEdit(scripts)
+    )
+    try:
+        dying = service.create_gold_work_order(task.id, actor="evals")
+        dwid = dying["work_order_id"]
+        service.draft_plan(dwid, actor="evals")
+        service.decide_plan(dwid, approve=True, actor="Eval Reviewer")
+        interrupted = service.start_run(dwid, actor="evals")
+    finally:
+        service_module.make_model = original
+    check(
+        "observability: the seed interruption lands interrupted",
+        interrupted["status"] == "interrupted",
+        f"run {interrupted['status']}",
+    )
+
+    rejected = service.create_gold_work_order("order-total-rounding", actor="evals")
+    rwid = rejected["work_order_id"]
+    service.draft_plan(rwid, actor="evals")
+    service.decide_plan(
+        rwid, approve=False, actor="Eval Reviewer", note="not now"
+    )
+
+    digest = service.operations_digest()
+    by_status = digest["runs"]["by_status"]
+    check(
+        "observability: the digest counts the seeded runs by status",
+        by_status.get("succeeded", 0) >= 1
+        and by_status.get("failed", 0) >= 1
+        and by_status.get("interrupted", 0) >= 1,
+        f"by_status {by_status}",
+    )
+    check(
+        "observability: every seeded failure classifies",
+        digest["failures"]["total"] >= 2
+        and digest["failures"]["unclassified"] == {},
+        f"failures {digest['failures']['by_name']}; "
+        f"unclassified {digest['failures']['unclassified']}",
+    )
+    check(
+        "observability: the digest counts the gates' decisions",
+        digest["plan_decisions"]["approved"] >= 3
+        and digest["plan_decisions"]["rejected"] >= 1
+        and digest["review_decisions"]["accepted"] >= 1,
+        f"plans {digest['plan_decisions']}; "
+        f"reviews {digest['review_decisions']}",
+    )
+    check(
+        "observability: the digest carries its governed versions",
+        digest["taxonomy_version"] >= 1
+        and "cost_per_successful_task" in digest["cost"],
+        f"taxonomy v{digest['taxonomy_version']}; "
+        f"cost per success {digest['cost'].get('cost_per_successful_task')}",
+    )
+
+
 def main() -> int:
     checks: list[tuple[str, bool, str]] = []
 
@@ -2096,6 +2206,7 @@ def main() -> int:
     template_library_leg(suite, scratch, check)
     challenge_pass_leg(suite, scratch, check)
     batch_leg(suite, scratch, check)
+    observability_leg(suite, scratch, check)
 
     print(f"out-of-scope edits landed: {counters['out_of_scope_edits']} (gate 0)")
     print(f"unverified successes: {counters['unverified_successes']} (gate 0)")
