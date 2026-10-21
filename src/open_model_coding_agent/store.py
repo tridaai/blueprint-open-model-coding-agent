@@ -22,7 +22,11 @@ from .config import Settings
 
 
 def utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Microseconds, not seconds: every listing orders by created_at,
+    # and two records stamped in the same second would otherwise
+    # fall back to their random ids — a run restarted within a
+    # second of its predecessor could sort as the older one.
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _migration_files(kind: str, base: Path) -> list[Path]:

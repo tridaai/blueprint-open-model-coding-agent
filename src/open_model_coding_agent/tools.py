@@ -147,7 +147,7 @@ class SandboxTools:
         test_timeout: int,
         plan_steps: list[dict] | None = None,
     ) -> None:
-        self.root = Path(root)
+        self.root = Path(root).resolve()
         self.scope = list(scope)
         self.test_timeout = test_timeout
         # The approved plan's steps (intent/files/tests per step), the
@@ -159,10 +159,25 @@ class SandboxTools:
 
     # -- path discipline ----------------------------------------------
     def _resolve(self, rel: str) -> Path | None:
-        """Resolve a workspace-relative path, refusing escapes."""
+        """Resolve a workspace-relative path, refusing escapes and
+        case-mismatched spellings."""
         candidate = (self.root / rel).resolve()
         if candidate != self.root and self.root not in candidate.parents:
             return None
+        # On a case-insensitive filesystem (macOS, Windows) "PKG/CALC.PY"
+        # opens pkg/calc.py; the workspace is case-exact, so an existing
+        # component spelled differently on disk is refused like an escape.
+        current = self.root
+        for part in candidate.relative_to(self.root).parts:
+            try:
+                entries = os.listdir(current)
+            except OSError:
+                break
+            if part not in entries:
+                if part.casefold() in {e.casefold() for e in entries}:
+                    return None
+                break
+            current = current / part
         return candidate
 
     def _rel(self, path: Path) -> str:
