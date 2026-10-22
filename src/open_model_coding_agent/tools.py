@@ -823,9 +823,47 @@ def _missing_args(
     return result
 
 
+# The argument names each tool takes — the same names the live
+# adapter's tool schemas advertise (a test holds the two together).
+TOOL_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "list_files": (),
+    "read_file": ("path", "start_line", "end_line"),
+    "search": (
+        "pattern", "case_sensitive", "glob", "path", "limit", "context"
+    ),
+    "edit_file": ("path", "old", "new"),
+    "run_tests": ("paths", "only_affected"),
+}
+
+
+def _unknown_args(tool: str, args: dict) -> ToolResult | None:
+    """Refuse a call that names an argument the tool does not take.
+    Ignoring it would run the call without it: a read with
+    ``line_start`` comes back as the whole file, and a model paging
+    by the wrong name re-reads the same file until its context runs
+    out."""
+    accepted = TOOL_ARGUMENTS[tool]
+    unknown = sorted(name for name in args if name not in accepted)
+    if not unknown:
+        return None
+    return ToolResult(
+        False,
+        f"{tool} refused: unknown argument(s) {unknown}; this tool takes "
+        f"{list(accepted)}, received {sorted(args)} — call it again with "
+        "those names",
+        refused=True,
+        code="unknown_argument",
+        detail={"unknown": unknown, "accepted": list(accepted)},
+    )
+
+
 def dispatch(tools: SandboxTools, step) -> ToolResult:
     """Run one model step through the tool port."""
     args = step.args or {}
+    if step.tool in TOOL_ARGUMENTS:
+        refusal = _unknown_args(step.tool, args)
+        if refusal is not None:
+            return refusal
     if step.tool == "list_files":
         return tools.list_files()
     if step.tool == "read_file":

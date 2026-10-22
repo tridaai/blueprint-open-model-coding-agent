@@ -12,7 +12,8 @@ import pytest
 import open_model_coding_agent.service as service_module
 from open_model_coding_agent.gold import GoldSuite
 from open_model_coding_agent.model_port import OfflineScriptedModel, Step
-from open_model_coding_agent.tools import SandboxTools, dispatch
+from open_model_coding_agent.baseten import TOOL_SCHEMAS
+from open_model_coding_agent.tools import TOOL_ARGUMENTS, SandboxTools, dispatch
 
 WORKSHOP = Path(__file__).resolve().parents[1] / "workshop"
 GOLD_DIR = Path(__file__).resolve().parents[1] / "evals" / "gold"
@@ -66,21 +67,52 @@ def test_an_empty_anchor_is_named_not_counted(repo_tools):
 
 
 def test_dispatch_names_the_arguments_a_call_left_out(repo_tools):
-    edit = dispatch(
-        repo_tools,
-        Step("edit_file", {"path": "workshop/inventory.py",
-                           "old_str": "def skus(self)", "new_str": "x"}),
-    )
+    edit = dispatch(repo_tools, Step("edit_file", {"path": "workshop/inventory.py"}))
     assert edit.refused
     assert "missing argument(s) ['old', 'new']" in edit.output
-    assert "received ['new_str', 'old_str', 'path']" in edit.output
+    assert "received ['path']" in edit.output
 
-    tests = dispatch(
-        repo_tools,
-        Step("run_tests", {"test_files": "['workshop/inventory.py']"}),
-    )
+    tests = dispatch(repo_tools, Step("run_tests", {}))
     assert tests.refused and tests.code == "no_test_paths"
     assert "this tool takes ['paths']" in tests.output
+
+
+@pytest.mark.parametrize(
+    "tool, args, unknown",
+    [
+        # The live run that looped: read_file paged by the wrong names
+        # and got the whole 77-line file back fifteen times.
+        ("read_file", {"path": "workshop/inventory.py", "line_start": 400,
+                       "line_end": 800}, ["line_end", "line_start"]),
+        ("search", {"query": "coupon"}, ["query"]),
+        ("edit_file", {"path": "workshop/inventory.py",
+                       "old_str": "def skus(self)", "new_str": "x"},
+         ["new_str", "old_str"]),
+        ("run_tests", {"test_files": ["workshop/tests/test_inventory.py"]},
+         ["test_files"]),
+        ("list_files", {"path": "workshop"}, ["path"]),
+    ],
+)
+def test_an_unknown_argument_refuses_by_name(repo_tools, tool, args, unknown):
+    before = (repo_tools.root / "workshop" / "inventory.py").read_text()
+    result = dispatch(repo_tools, Step(tool, args))
+    assert result.refused and result.code == "unknown_argument"
+    assert f"unknown argument(s) {unknown}" in result.output
+    assert f"this tool takes {list(TOOL_ARGUMENTS[tool])}" in result.output
+    assert result.detail["unknown"] == unknown
+    # Refused before the tool ran: nothing read, searched or changed.
+    assert (repo_tools.root / "workshop" / "inventory.py").read_text() == before
+
+
+def test_tool_arguments_match_the_live_tool_schemas():
+    advertised = {
+        s["function"]["name"]: set(s["function"]["parameters"]["properties"])
+        for s in TOOL_SCHEMAS
+        if s["function"]["name"] != "finish"
+    }
+    assert advertised == {
+        tool: set(names) for tool, names in TOOL_ARGUMENTS.items()
+    }
 
 
 def test_a_bare_string_path_is_one_path_not_its_characters(repo_tools):
