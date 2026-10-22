@@ -198,13 +198,15 @@ def test_version_resolution_latest_published_wins(service):
     )  # v3 stays a draft
 
     order = service.instantiate_template(
-        "ledger-guard", parameters=GUARD_PARAMS, actor="tester"
+        "ledger-guard", parameters=GUARD_PARAMS, actor="tester",
+        gold_task_id="reserve-overcommit",
     )
     assert order["template"]["version"] == 2
     assert order["task_text"].startswith("Second wording")
 
     older = service.instantiate_template(
-        "ledger-guard", version=1, parameters=GUARD_PARAMS, actor="tester"
+        "ledger-guard", version=1, parameters=GUARD_PARAMS, actor="tester",
+        gold_task_id="reserve-overcommit",
     )
     assert older["template"]["version"] == 1
 
@@ -282,6 +284,7 @@ def test_a_restated_wider_scope_refuses_as_widening(service):
         parameters=GUARD_PARAMS,
         actor="tester",
         file_scope=["workshop/inventory.py"],
+        gold_task_id="reserve-overcommit",
     )
     assert order["file_scope"] == ["workshop/inventory.py"]
 
@@ -623,7 +626,11 @@ def test_templates_api_round_trip(settings):
 
     order = client.post(
         "/api/templates/api-shape/instantiate",
-        json={"parameters": GUARD_PARAMS, "actor": "tester"},
+        json={
+            "parameters": GUARD_PARAMS,
+            "actor": "tester",
+            "gold_task_id": "reserve-overcommit",
+        },
     )
     assert order.status_code == 201
     assert order.json()["template"]["name"] == "api-shape"

@@ -249,6 +249,7 @@ from .templates import (
     SEED_PUBLISHER,
     check_substituted_scope,
     path_parameters,
+    scope_entry_problem,
     seed_template_specs,
     substitute,
     substitute_steps,
@@ -273,6 +274,32 @@ def _copy_ignore(directory: str, names: list[str]) -> set[str]:
         if Path(directory, name).is_symlink():
             ignored.add(name)
     return ignored
+
+
+def _work_order_shape_problem(body: WorkOrderIn) -> str | None:
+    """Why an intake body cannot become a work order, or None. The
+    same fields a batch's ad-hoc item cannot be created without,
+    and every scope and grading path a clean repo-relative path —
+    the scope is what approval fingerprints and the sandbox
+    confines edits to, so it never names a file outside the repo."""
+    missing = [
+        name
+        for name in ("title", "task_text")
+        if not (getattr(body, name) or "").strip()
+    ]
+    if not body.file_scope:
+        missing.append("file_scope")
+    if missing:
+        return f"missing {', '.join(missing)}"
+    for label, entries in (
+        ("file_scope", body.file_scope),
+        ("grading_tests", body.grading_tests),
+    ):
+        for entry in entries:
+            problem = scope_entry_problem(entry)
+            if problem:
+                return f"{label} entry {entry!r} is refused: {problem}"
+    return None
 
 # Model failures that mean "the world hiccupped", not "the work is
 # wrong": the provider stayed rate-limited, overloaded, erroring, or
@@ -3540,14 +3567,27 @@ class CodingService:
             created_at=utcnow(),
             updated_at=utcnow(),
         )
-        if body.gold_task_id:
-            task = self.gold.get(body.gold_task_id)
-            if task is None:
-                raise GateError(
-                    "unknown_gold_task", f"no gold task named {body.gold_task_id!r}"
-                )
+        task = self.gold.get(body.gold_task_id) if body.gold_task_id else None
+        if body.gold_task_id and task is None:
+            raise GateError(
+                "unknown_gold_task", f"no gold task named {body.gold_task_id!r}"
+            )
+        problem = _work_order_shape_problem(body)
+        if problem:
+            raise GateError("invalid_work_order", f"work order refused: {problem}")
+        if task is not None:
             order.target_path = str(self._materialise_target(task))
         else:
+            # An ad-hoc order works against a repo the caller names.
+            # An empty path is not "no repo": Path("") is the
+            # server's own working directory, so it must refuse
+            # here rather than copy the shell — its .env, its data
+            # directory, its own runs — into a model's workspace.
+            problem = self._target_problem(body.target_path)
+            if problem:
+                raise GateError(
+                    "invalid_work_order", f"work order refused: {problem}"
+                )
             order.target_path = body.target_path
         self.store.put_work_order(order.model_dump())
         self._audit(
@@ -3648,6 +3688,43 @@ class CodingService:
         )
         return plan
 
+    def _target_problem(self, target_path: str) -> str | None:
+        """Why an ad-hoc target cannot back a work order, or None.
+        The target must be named, absolute, a directory on disk, and
+        must not hold the shell's own data directories — a run
+        copies the whole target, so a target holding the runs
+        directory would copy each run into itself."""
+        if not (target_path or "").strip():
+            return (
+                "it names no target repo — an ad-hoc order works "
+                "against a repo on disk, named by target_path"
+            )
+        target = Path(target_path)
+        if not target.is_absolute():
+            return (
+                f"target_path {target_path!r} is relative — name the "
+                f"repo by its absolute path"
+            )
+        if not target.is_dir():
+            return f"target repo {target} does not exist on disk"
+        return self._target_holds_shell_data(target)
+
+    def _target_holds_shell_data(self, target: Path) -> str | None:
+        resolved = target.resolve()
+        for held in (
+            self.settings.runs_dir,
+            self.settings.targets_dir,
+            self.settings.artifacts_dir,
+        ):
+            held = Path(held).resolve()
+            if held == resolved or resolved in held.parents:
+                return (
+                    f"target repo {target} holds the shell's own data "
+                    f"directory {held} — a run would copy the shell, "
+                    f"and its own runs, into the model's workspace"
+                )
+        return None
+
     def _materialise_target(self, task) -> Path:
         """The task's repo on disk: the workshop, with the broken
         overlay applied. This directory is the 'developer's repo' the
@@ -3692,7 +3769,7 @@ class CodingService:
         """The target repo's files, repo-relative — the context plan
         validation resolves test names against."""
         target = Path(order["target_path"])
-        if not target.is_dir():
+        if not order["target_path"] or not target.is_dir():
             return []
         return sorted(
             p.relative_to(target).as_posix()
@@ -4065,10 +4142,15 @@ class CodingService:
             workspace = run_dir / "workspace"
             pristine = run_dir / "pristine"
             target = Path(order["target_path"])
-            if not target.is_dir():
+            if not order["target_path"] or not target.is_dir():
                 raise GateError(
                     "target_missing", f"target repo {target} does not exist on disk"
                 )
+            # Records created before intake checked targets may still
+            # name one that holds the shell's data: refuse, never copy.
+            overlap = self._target_holds_shell_data(target)
+            if overlap:
+                raise GateError("invalid_work_order", overlap)
             shutil.copytree(target, workspace, ignore=_copy_ignore)
             shutil.copytree(target, pristine, ignore=_copy_ignore)
             run = Run(
@@ -5192,6 +5274,15 @@ class CodingService:
                 )
             self._apply_request_changes(order, run, actor=actor, note=note)
             return self.store.get_work_order(work_order_id)
+        if decision == "reject":
+            reason = (reason or "").strip()
+            if not reason:
+                raise GateError(
+                    "reject_reason_required",
+                    "rejecting a review requires the reviewer's reason: "
+                    "a rejection closes the order, and the reason is "
+                    "the record of why",
+                )
         if order["status"] == "awaiting_second_acceptance":
             # Round 18: a first acceptance stands parked on this
             # order. The act completes, closes, or is refused from

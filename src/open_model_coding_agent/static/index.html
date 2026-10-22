@@ -43,6 +43,9 @@
   <div>
     <h1>Open-Model Coding Agent</h1>
     <div class="sub" id="readiness">loading…</div>
+    <div class="sub"><label>Acting as
+      <input id="actor" size="24" onchange="setActor(this.value)"></label>
+      — every act you take here is recorded under this name</div>
   </div>
 </header>
 <main>
@@ -113,7 +116,21 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+// Who the console acts as. Recorded on every act; dual control and
+// separation of duties compare these names, so a second reviewer
+// sets their own name here.
 let actor = "Console Reviewer";
+try { actor = localStorage.getItem("coding-agent-actor") || actor; } catch (e) {}
+$("actor").value = actor;
+
+function setActor(value) {
+  const name = value.trim();
+  if (name) {
+    actor = name;
+    try { localStorage.setItem("coding-agent-actor", name); } catch (e) {}
+  }
+  $("actor").value = actor;
+}
 
 async function api(path, method = "GET", body = null) {
   const res = await fetch(path, {
@@ -122,7 +139,12 @@ async function api(path, method = "GET", body = null) {
     body: body ? JSON.stringify(body) : null,
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || (res.status + " " + res.statusText));
+  if (!res.ok) {
+    const detail = Array.isArray(data.detail)
+      ? data.detail.map((d) => `${(d.loc || []).slice(1).join(".")}: ${d.msg}`).join("; ")
+      : data.detail;
+    throw new Error(detail || (res.status + " " + res.statusText));
+  }
   return data;
 }
 
@@ -897,7 +919,7 @@ async function showDetail(id) {
     }
   }
   html += `<h3>Audit trail</h3><pre>` +
-    (d.audit || []).map((a) => `${a.created_at}  ${a.event}  by ${a.actor}`).join("\n") +
+    (d.audit || []).map((a) => `${esc(a.created_at)}  ${esc(a.event)}  by ${esc(a.actor)}`).join("\n") +
     `</pre></div>`;
   $("detail").innerHTML = html;
 }
@@ -962,8 +984,12 @@ async function decidePlan(id, approve) {
 }
 
 async function decideReview(id, accept) {
-  await act(`/api/work-orders/${id}/review`,
-    { accept, actor, reason: accept ? null : "rejected in console" }, id);
+  let reason = null;
+  if (!accept) {
+    reason = prompt("Why is this patch rejected? The reason is stored on the audit trail.");
+    if (reason === null) return;
+  }
+  await act(`/api/work-orders/${id}/review`, { accept, actor, reason }, id);
 }
 
 async function withdrawAcceptance(id) {

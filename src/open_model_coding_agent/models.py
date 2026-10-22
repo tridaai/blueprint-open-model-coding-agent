@@ -7,7 +7,15 @@ of the database, the API, or the console sees the same facts.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Annotated
+
+from pydantic import BaseModel, Field, StringConstraints
+
+# Who performs an act, as a request names them: stripped, and never
+# empty. Actors are recorded, not authenticated — but a blank name
+# records nobody, and a padded one would pass separation-of-duties
+# checks as a second person.
+ActorName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 # Work order lifecycle:
 #   draft -> plan_ready -> approved -> running -> succeeded -> accepted
@@ -68,7 +76,7 @@ class WorkOrderIn(BaseModel):
     # Ad-hoc orders only: the repo on disk to work against. Gold tasks
     # materialise their own target from the suite.
     target_path: str = ""
-    requested_by: str = "console"
+    requested_by: ActorName = "console"
 
 
 class WorkOrder(BaseModel):
@@ -227,7 +235,7 @@ class Run(BaseModel):
 
 class PlanDecisionIn(BaseModel):
     approve: bool
-    actor: str
+    actor: ActorName
     note: str | None = None
 
 
@@ -243,14 +251,14 @@ class AmendPlanIn(BaseModel):
 
     approach: str
     steps: list[PlanStepIn]
-    actor: str
+    actor: ActorName
 
 
 class RunStartIn(BaseModel):
     # Naming a plan version pins the run to it; anything but the
     # latest version is refused as plan_superseded.
     plan_version: int | None = None
-    actor: str = "console"
+    actor: ActorName = "console"
 
 
 class ReviewDecisionIn(BaseModel):
@@ -261,7 +269,7 @@ class ReviewDecisionIn(BaseModel):
     note is required, and it is what the next plan draft sees."""
 
     accept: bool = True
-    actor: str
+    actor: ActorName
     reason: str | None = None
     decision: str | None = None  # accept | reject | request_changes
 
@@ -269,13 +277,13 @@ class ReviewDecisionIn(BaseModel):
 class RunActionIn(BaseModel):
     """Resume and restart arrive as a bare act: who is doing it."""
 
-    actor: str = "console"
+    actor: ActorName = "console"
 
 
 class RunAbandonIn(BaseModel):
     """Abandoning a run is a recorded act: who, and why."""
 
-    actor: str
+    actor: ActorName
     reason: str
 
 
@@ -285,7 +293,7 @@ class BenchmarkIn(BaseModel):
 
     profile_id: str
     set_name: str = "tuning"
-    actor: str = "console"
+    actor: ActorName = "console"
 
 
 class EvaluateIn(BaseModel):
@@ -293,7 +301,7 @@ class EvaluateIn(BaseModel):
     times (the gate's default is the worst of 3)."""
 
     profile_id: str
-    actor: str
+    actor: ActorName
     times: int = 3
 
 
@@ -302,7 +310,7 @@ class PromoteIn(BaseModel):
     rationale the judgement stands on."""
 
     profile_id: str
-    actor: str
+    actor: ActorName
     rationale: str
 
 
@@ -310,7 +318,7 @@ class RollbackIn(BaseModel):
     """Rollback is a recorded act too: who restored the previous
     default, and why."""
 
-    actor: str
+    actor: ActorName
     rationale: str
 
 
@@ -319,7 +327,7 @@ class PromotionRejectIn(BaseModel):
     who rejects it, and why — both recorded beside the parked
     decision it closes."""
 
-    actor: str
+    actor: ActorName
     reason: str | None = None
 
 
@@ -327,14 +335,14 @@ class PromotionWithdrawIn(BaseModel):
     """Withdrawal of a parked promotion-gate act (round 18) by the
     actor who recorded it — the only actor who may."""
 
-    actor: str
+    actor: ActorName
 
 
 class AcceptanceWithdrawIn(BaseModel):
     """Withdrawal of a parked review acceptance (round 18) by the
     reviewer who recorded it — the only actor who may."""
 
-    actor: str
+    actor: ActorName
 
 
 class TaskTemplate(BaseModel):
@@ -373,7 +381,7 @@ class TemplateIn(BaseModel):
     parameters: list[str] = Field(default_factory=list)
     scope_pattern: list[str]
     steps: list[PlanStepIn]
-    author: str
+    author: ActorName
 
 
 class TemplatePublishIn(BaseModel):
@@ -381,7 +389,7 @@ class TemplatePublishIn(BaseModel):
     refuses the version's own author — publishing is a second
     person's judgement that the shape is sound."""
 
-    actor: str
+    actor: ActorName
 
 
 class TemplateInstantiateIn(BaseModel):
@@ -393,7 +401,7 @@ class TemplateInstantiateIn(BaseModel):
 
     version: int | None = None
     parameters: dict[str, str] = Field(default_factory=dict)
-    actor: str = "console"
+    actor: ActorName = "console"
     title: str | None = None
     target_path: str = ""
     grading_tests: list[str] = Field(default_factory=list)
@@ -411,7 +419,7 @@ class SkillEvaluateIn(BaseModel):
     One paired pass is the recorded minimum; more passes score
     by their worst, like the promotion gate's evaluations."""
 
-    actor: str
+    actor: ActorName
     times: int = Field(default=1, ge=1, le=5)
 
 
@@ -421,7 +429,7 @@ class SkillPublishIn(BaseModel):
     version's author and the evaluation's own recorder — the
     judgement must be a second person's, on evidence."""
 
-    actor: str
+    actor: ActorName
     rationale: str = ""
 
 
@@ -430,7 +438,7 @@ class SkillRollbackIn(BaseModel):
     and why. It un-publishes the latest published version, so
     mounts resolve to the previous published version again."""
 
-    actor: str
+    actor: ActorName
     rationale: str = ""
 
 
@@ -443,7 +451,7 @@ class ChallengeAnswerIn(BaseModel):
     kind."""
 
     kind: str  # accept_and_revise | rebut | downgrade
-    actor: str
+    actor: ActorName
     text: str | None = None
     cites: str | None = None
     reason: str | None = None
@@ -457,7 +465,7 @@ class ComparisonIn(BaseModel):
     comparison always covers every recorded profile."""
 
     set_name: str = "tuning"
-    actor: str = "console"
+    actor: ActorName = "console"
 
 
 class Batch(BaseModel):
@@ -541,7 +549,7 @@ class BatchIn(BaseModel):
 class BatchDriveIn(BaseModel):
     """Driving a batch is a recorded act: who drives this pass."""
 
-    actor: str = "console"
+    actor: ActorName = "console"
 
 
 class BatchCancelIn(BaseModel):
@@ -549,7 +557,7 @@ class BatchCancelIn(BaseModel):
     named actor may cancel — cancellation stops work, it approves
     nothing — and the record names who did it."""
 
-    actor: str
+    actor: ActorName
     reason: str
 
 
@@ -557,5 +565,5 @@ class BatchReleaseDriverIn(BaseModel):
     """Releasing a dead driver mark is a recorded act: who, and
     why — the mark it clears names the pass that died holding it."""
 
-    actor: str
+    actor: ActorName
     reason: str
