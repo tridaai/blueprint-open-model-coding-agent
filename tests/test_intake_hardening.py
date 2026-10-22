@@ -201,3 +201,67 @@ def test_the_console_escapes_the_audit_trail():
     # The console names who it acts as, rather than one fixed reviewer
     # that dual control could never tell apart from a second one.
     assert 'id="actor"' in html
+
+
+def test_a_gold_order_records_who_asked_for_it(settings):
+    client = TestClient(create_app(settings))
+    named = client.post(
+        "/api/work-orders/from-gold/reserve-overcommit",
+        json={"actor": "  Madhavan  "},
+    )
+    assert named.status_code == 201
+    assert named.json()["requested_by"] == "Madhavan"
+    # A caller that sends no body still lands, under the old default.
+    bare = client.post("/api/work-orders/from-gold/reserve-overcommit")
+    assert bare.status_code == 201
+    assert bare.json()["requested_by"] == "console"
+    blank = client.post(
+        "/api/work-orders/from-gold/reserve-overcommit", json={"actor": "  "}
+    )
+    assert blank.status_code == 422
+
+
+def test_drafting_and_running_record_who_did_it(settings):
+    client = TestClient(create_app(settings))
+    wid = client.post(
+        "/api/work-orders/from-gold/reserve-overcommit",
+        json={"actor": "Madhavan"},
+    ).json()["work_order_id"]
+    assert client.post(
+        f"/api/work-orders/{wid}/plan", json={"actor": "  "}
+    ).status_code == 422
+    assert client.post(
+        f"/api/work-orders/{wid}/plan", json={"actor": "Madhavan"}
+    ).status_code == 200
+    client.post(
+        f"/api/work-orders/{wid}/plan/decide",
+        json={"approve": True, "actor": "Madhavan"},
+    )
+    assert client.post(
+        f"/api/work-orders/{wid}/runs", json={"actor": "Madhavan"}
+    ).status_code == 201
+    events = {
+        a["event"]: a["actor"]
+        for a in client.get(f"/api/work-orders/{wid}").json()["audit"]
+    }
+    assert events["work_order_created"] == "Madhavan"
+    assert events["plan_drafted"] == "Madhavan"
+    assert events["plan_approved"] == "Madhavan"
+    assert events["run_started"] == "Madhavan"
+
+
+def test_the_console_brings_an_opened_order_into_view():
+    html = (
+        REPO_ROOT / "src" / "open_model_coding_agent" / "static" / "index.html"
+    ).read_text()
+    # The create button sends the acting name and opens the order with
+    # a scroll, since the detail renders at the foot of the page.
+    assert "from-gold/${id}`, \"POST\", { actor }" in html
+    assert '$("detail").scrollIntoView(' in html
+    assert "onclick=\"showDetail(" not in html
+    # Every act the detail offers sends the acting name.
+    assert "${id}/plan', {actor}," in html
+    assert "${id}/runs', {actor}," in html
+    assert ", null, '${id}')" not in html
+    # A refusal stays visible however far down the act was taken.
+    assert "#error:not(:empty) { position: sticky;" in html

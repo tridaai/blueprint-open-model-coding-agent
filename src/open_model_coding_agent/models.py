@@ -254,6 +254,14 @@ class AmendPlanIn(BaseModel):
     actor: ActorName
 
 
+class ActorIn(BaseModel):
+    """A bare act — creating a gold order, drafting a plan — that
+    carries only who is doing it, recorded on the audit trail so
+    separation of duties can tell a requester from a reviewer."""
+
+    actor: ActorName = "console"
+
+
 class RunStartIn(BaseModel):
     # Naming a plan version pins the run to it; anything but the
     # latest version is refused as plan_superseded.

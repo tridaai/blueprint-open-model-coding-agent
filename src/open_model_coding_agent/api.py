@@ -27,6 +27,7 @@ from .models import (
     BenchmarkIn,
     ChallengeAnswerIn,
     ComparisonIn,
+    ActorIn,
     EvaluateIn,
     PlanDecisionIn,
     PromoteIn,
@@ -338,8 +339,9 @@ def create_app(settings=None) -> FastAPI:
         return service.create_work_order(body, actor=body.requested_by)
 
     @app.post("/api/work-orders/from-gold/{gold_task_id}", status_code=201)
-    def create_from_gold(gold_task_id: str):
-        return service.create_gold_work_order(gold_task_id)
+    def create_from_gold(gold_task_id: str, body: ActorIn | None = None):
+        body = body or ActorIn()
+        return service.create_gold_work_order(gold_task_id, actor=body.actor)
 
     @app.get("/api/work-orders")
     def list_work_orders():
@@ -356,8 +358,9 @@ def create_app(settings=None) -> FastAPI:
         return detail
 
     @app.post("/api/work-orders/{work_order_id}/plan")
-    def draft_plan(work_order_id: str):
-        return service.draft_plan(work_order_id)
+    def draft_plan(work_order_id: str, body: ActorIn | None = None):
+        body = body or ActorIn()
+        return service.draft_plan(work_order_id, actor=body.actor)
 
     @app.post("/api/work-orders/{work_order_id}/plan/decide")
     def decide_plan(work_order_id: str, body: PlanDecisionIn):

@@ -35,6 +35,11 @@
   footer img { width: 28px; height: 28px; }
   footer a { color: #4F46E5; text-decoration: none; }
   #error { color: #B91C1C; font-size: 13px; min-height: 18px; }
+  /* A refusal stays in view wherever the act was taken — the order
+     detail sits at the foot of the page, far below the header. */
+  #error:not(:empty) { position: sticky; top: 0; z-index: 10;
+                       background: #FEF2F2; border: 1px solid #FCA5A5;
+                       border-radius: 6px; padding: 8px 12px; }
 </style>
 </head>
 <body>
@@ -380,7 +385,7 @@ async function loadQueue() {
           `</td>
           <td>${ageText(e.age_seconds)}<div class="muted">since ${esc(e.since || "")}</div></td>
           <td>${detail}</td>
-          <td><button class="secondary" onclick="showDetail('${esc(e.work_order_id)}')">Open</button></td>
+          <td><button class="secondary" onclick="openOrder('${esc(e.work_order_id)}')">Open</button></td>
         </tr>`;
       }).join("")}
       </tbody></table>
@@ -535,7 +540,7 @@ async function instantiateTemplate(name, version) {
     });
     await loadOrders();
     await loadTemplates();
-    await showDetail(order.work_order_id);
+    await openOrder(order.work_order_id);
   } catch (e) { showError(e); }
 }
 
@@ -642,10 +647,18 @@ async function cancelBatch(id) {
 
 async function createFromGold(id) {
   try {
-    const order = await api(`/api/work-orders/from-gold/${id}`, "POST");
+    const order = await api(`/api/work-orders/from-gold/${id}`, "POST", { actor });
     await loadOrders();
-    await showDetail(order.work_order_id);
+    await loadDigest();
+    await openOrder(order.work_order_id);
   } catch (e) { showError(e); }
+}
+
+// Opening an order brings its detail into view: it renders at the
+// foot of the page, so without the scroll a click looks like nothing.
+async function openOrder(id) {
+  await showDetail(id);
+  $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function loadDigest() {
@@ -701,7 +714,7 @@ async function loadOrders() {
       <td>${esc(o.title)}</td>
       <td class="status">${esc(o.status)}</td>
       <td>${o.file_scope.map(esc).join("<br>")}</td>
-      <td><button class="secondary" onclick="showDetail('${esc(o.work_order_id)}')">Open</button></td>
+      <td><button class="secondary" onclick="openOrder('${esc(o.work_order_id)}')">Open</button></td>
     </tr>`).join("") || `<tr><td colspan="5" class="muted">No work orders yet.</td></tr>`;
 }
 
@@ -748,7 +761,7 @@ async function showDetail(id) {
   }
   if (!plan && o.status === "draft") {
     html += `<div style="margin-top:10px">
-      <button onclick="act('/api/work-orders/${id}/plan', null, '${id}')">Draft plan</button></div>`;
+      <button onclick="act('/api/work-orders/${id}/plan', {actor}, '${id}')">Draft plan</button></div>`;
   }
   if (o.status === "changes_requested") {
     html += `<div class="card" style="margin-top:10px; border-color:#B45309">
@@ -756,7 +769,7 @@ async function showDetail(id) {
       and rides into the next plan draft's context:
       <div style="margin-top:6px">“${esc(o.review_note || "")}”</div>
       <div style="margin-top:10px">
-        <button onclick="act('/api/work-orders/${id}/plan', null, '${id}')">Draft a new plan</button>
+        <button onclick="act('/api/work-orders/${id}/plan', {actor}, '${id}')">Draft a new plan</button>
       </div></div>`;
   }
   const plans = (d.plans && d.plans.length) ? d.plans : (plan ? [plan] : []);
@@ -770,7 +783,7 @@ async function showDetail(id) {
   });
   if (o.status === "approved") {
     html += `<div style="margin-top:10px">
-      <button onclick="act('/api/work-orders/${id}/runs', null, '${id}')">Run the agent</button></div>`;
+      <button onclick="act('/api/work-orders/${id}/runs', {actor}, '${id}')">Run the agent</button></div>`;
   }
   if (run) {
     const v = run.verification || {};
