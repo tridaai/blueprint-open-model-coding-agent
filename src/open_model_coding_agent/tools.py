@@ -463,6 +463,17 @@ class SandboxTools:
                 code="binary_file",
                 detail={"path": path},
             )
+        if not old:
+            # An empty anchor "occurs" between every character; name
+            # what is wrong instead of reporting thousands of matches.
+            return ToolResult(
+                False,
+                f"edit refused: the anchor `old` is empty — read {path} "
+                f"and pass the exact text to replace, unique in the file",
+                refused=True,
+                code="anchor_not_found",
+                detail={"path": path, "anchor_sha256": _sha256(old)},
+            )
         occurrences = text.count(old)
         if occurrences == 0:
             return ToolResult(
@@ -786,6 +797,32 @@ def _opt_bool(args: dict, name: str, default: bool) -> bool:
     return value if isinstance(value, bool) else default
 
 
+def _paths_arg(args: dict) -> list[str]:
+    """``paths`` as a list of strings. A bare string is one path —
+    never split into its characters."""
+    value = args.get("paths")
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [str(p) for p in value]
+    return []
+
+
+def _missing_args(
+    result: ToolResult, args: dict, required: tuple[str, ...]
+) -> ToolResult:
+    """Name the expected arguments on a refusal when the call left a
+    required one out, so a model that used other names can correct
+    itself instead of repeating the call."""
+    missing = [name for name in required if name not in args]
+    if result.refused and missing:
+        result.output += (
+            f" (missing argument(s) {missing}; this tool takes "
+            f"{list(required)}, received {sorted(args)})"
+        )
+    return result
+
+
 def dispatch(tools: SandboxTools, step) -> ToolResult:
     """Run one model step through the tool port."""
     args = step.args or {}
@@ -810,14 +847,16 @@ def dispatch(tools: SandboxTools, step) -> ToolResult:
             context=SEARCH_DEFAULT_CONTEXT if context is None else context,
         )
     if step.tool == "edit_file":
-        return tools.edit_file(
+        result = tools.edit_file(
             str(args.get("path", "")), str(args.get("old", "")), str(args.get("new", ""))
         )
+        return _missing_args(result, args, ("path", "old", "new"))
     if step.tool == "run_tests":
-        return tools.run_tests(
-            list(args.get("paths", [])),
+        result = tools.run_tests(
+            _paths_arg(args),
             affected_only=_opt_bool(args, "only_affected", False),
         )
+        return _missing_args(result, args, ("paths",))
     return ToolResult(
         False, f"unknown tool {step.tool!r}", refused=True, code="unknown_tool"
     )

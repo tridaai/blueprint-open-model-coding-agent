@@ -12,7 +12,7 @@ import pytest
 import open_model_coding_agent.service as service_module
 from open_model_coding_agent.gold import GoldSuite
 from open_model_coding_agent.model_port import OfflineScriptedModel, Step
-from open_model_coding_agent.tools import SandboxTools
+from open_model_coding_agent.tools import SandboxTools, dispatch
 
 WORKSHOP = Path(__file__).resolve().parents[1] / "workshop"
 GOLD_DIR = Path(__file__).resolve().parents[1] / "evals" / "gold"
@@ -54,6 +54,42 @@ def test_anchor_refusals_carry_stable_codes(repo_tools):
     assert not ambiguous.ok and ambiguous.refused
     assert ambiguous.code == "anchor_ambiguous"
     assert ambiguous.detail["occurrences"] > 1
+
+
+def test_an_empty_anchor_is_named_not_counted(repo_tools):
+    # A live llama3.1 run sent `old` empty four times and was told the
+    # anchor "occurs 3126 times" — the refusal now says what is wrong.
+    empty = repo_tools.edit_file("workshop/inventory.py", "", "x = 1")
+    assert empty.refused and empty.code == "anchor_not_found"
+    assert "anchor `old` is empty" in empty.output
+    assert "occurs" not in empty.output
+
+
+def test_dispatch_names_the_arguments_a_call_left_out(repo_tools):
+    edit = dispatch(
+        repo_tools,
+        Step("edit_file", {"path": "workshop/inventory.py",
+                           "old_str": "def skus(self)", "new_str": "x"}),
+    )
+    assert edit.refused
+    assert "missing argument(s) ['old', 'new']" in edit.output
+    assert "received ['new_str', 'old_str', 'path']" in edit.output
+
+    tests = dispatch(
+        repo_tools,
+        Step("run_tests", {"test_files": "['workshop/inventory.py']"}),
+    )
+    assert tests.refused and tests.code == "no_test_paths"
+    assert "this tool takes ['paths']" in tests.output
+
+
+def test_a_bare_string_path_is_one_path_not_its_characters(repo_tools):
+    result = dispatch(
+        repo_tools, Step("run_tests", {"paths": "workshop/inventory.py"})
+    )
+    # Refused as a non-test file by its whole name — never as "w".
+    assert result.refused
+    assert "workshop/inventory.py is not a test file" in result.output
 
 
 def test_ambiguous_anchor_recovers_by_narrowing(repo_tools):
